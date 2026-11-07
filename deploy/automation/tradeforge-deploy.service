@@ -1,0 +1,46 @@
+[Unit]
+Description=Tradeforge constrained OIDC deployment controller
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/usr/local/lib/tradeforge-deploy
+ExecStart=/usr/local/lib/tradeforge-deploy/venv/bin/python -s -m deploy.automation.server
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+Environment=DOCKER_CONFIG=/run/tradeforge-deploy/docker-public
+UMask=0077
+RuntimeDirectory=tradeforge-deploy
+RuntimeDirectoryMode=0700
+StateDirectory=tradeforge-deploy
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+MemoryMax=384M
+CPUQuota=50%
+TasksMax=128
+TimeoutStopSec=1200
+KillMode=mixed
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/forgetrade /var/lib/tradeforge-deploy /run/tradeforge-deploy
+ReadOnlyPaths=/opt/forgetrade/secrets /opt/forgetrade/source /opt/forgetrade/acme /opt/forgetrade/backups /opt/forgetrade/ops
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

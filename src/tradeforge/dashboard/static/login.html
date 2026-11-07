@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Tradeforge · Güvenli giriş</title>
+  <link rel="stylesheet" href="/assets/login.css">
+  <script src="/assets/login.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#session-key">Giriş formuna geç</a>
+  <div class="login-shell">
+    <header class="site-header">
+      <a class="brand" href="/login" aria-label="Tradeforge giriş">
+        <span class="brand-mark" aria-hidden="true">tf<span>↗</span></span>
+        <span class="brand-name">TRADEFORGE<span>TRADING INTELLIGENCE</span></span>
+      </a>
+      <span class="header-note"><span class="status-dot" aria-hidden="true"></span> Kontrollü erişim</span>
+    </header>
+
+    <main class="login-main">
+      <section class="intro" aria-labelledby="intro-title">
+        <p class="eyebrow"><span aria-hidden="true"></span> VERİDEN KARARA</p>
+        <h1 id="intro-title">Piyasaya net bakın.<br><span>Kanıtla ilerleyin.</span></h1>
+        <p class="intro-copy">Piyasa analizi, risk disiplini ve operasyonel görünürlük.<br class="desktop-break"> Tek bir çalışma alanında.</p>
+
+        <div class="market-visual" aria-hidden="true">
+          <div class="visual-heading"><span><span class="visual-icon">⌁</span> PİYASA PERSPEKTİFİ</span><span class="visual-label">ANALİZ</span></div>
+          <svg class="market-chart" viewBox="0 0 540 188" fill="none">
+            <defs>
+              <linearGradient id="chart-fill" x1="270" y1="25" x2="270" y2="180" gradientUnits="userSpaceOnUse"><stop stop-color="#46dcb2" stop-opacity=".17"/><stop offset="1" stop-color="#46dcb2" stop-opacity="0"/></linearGradient>
+              <linearGradient id="chart-line" x1="0" y1="130" x2="540" y2="30" gradientUnits="userSpaceOnUse"><stop stop-color="#28594e"/><stop offset=".5" stop-color="#46dcb2"/><stop offset="1" stop-color="#9cebd2"/></linearGradient>
+            </defs>
+            <path class="chart-grid" d="M0 40H540M0 85H540M0 130H540M0 175H540M60 15V180M165 15V180M270 15V180M375 15V180M480 15V180"/>
+            <path fill="url(#chart-fill)" d="M0 144 18 139 36 148 54 120 72 128 90 110 108 118 126 103 144 111 162 79 180 87 198 72 216 93 234 86 252 109 270 95 288 68 306 80 324 53 342 62 360 42 378 51 396 34 414 48 432 39 450 65 468 51 486 58 504 29 522 37 540 23V188H0Z"/>
+            <path stroke="url(#chart-line)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" d="M0 144 18 139 36 148 54 120 72 128 90 110 108 118 126 103 144 111 162 79 180 87 198 72 216 93 234 86 252 109 270 95 288 68 306 80 324 53 342 62 360 42 378 51 396 34 414 48 432 39 450 65 468 51 486 58 504 29 522 37 540 23"/>
+            <path class="chart-reference" d="M360 12V180"/>
+            <circle cx="360" cy="42" r="10" fill="#46dcb2" fill-opacity=".1"/>
+            <circle cx="360" cy="42" r="3.5" fill="#8be6c9" stroke="#132a27" stroke-width="2"/>
+          </svg>
+          <div class="visual-footer"><span>GÖZLEMLE <i>→</i> ANALİZ ET <i>→</i> DOĞRULA</span><span>01 / 03</span></div>
+        </div>
+
+        <div class="principles">
+          <div><span class="principle-number">01</span><div><h2>Piyasa görünürlüğü</h2><p>Veriyi bağlamıyla değerlendirin.</p></div></div>
+          <div><span class="principle-number">02</span><div><h2>Risk disiplini</h2><p>Kararları sınırlar içinde tutun.</p></div></div>
+        </div>
+      </section>
+
+      <section class="access" aria-labelledby="login-title">
+        <div class="login-card">
+          <div class="access-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
+          <p class="eyebrow">ÇALIŞMA ALANINIZ</p>
+          <h2 id="login-title">Tekrar hoş geldiniz.</h2>
+          <p class="login-copy">Tradeforge terminaline erişmek için<br>oturum anahtarınızı girin.</p>
+
+          <form id="login-form" method="post" action="/login" aria-labelledby="login-title">
+            <label for="session-key">Oturum anahtarı <span>Gerekli</span></label>
+            <div class="key-control">
+              <svg class="key-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="8" cy="9" r="4"/><path d="m11 12 8 8m-4-4 2-2m0 4 2-2"/></svg>
+              <input id="session-key" name="token" type="password" autocomplete="current-password" required minlength="43" maxlength="128" pattern="[A-Za-z0-9_\-]{43,128}" title="43–128 karakter; harf, rakam, alt çizgi veya kısa çizgi." placeholder="Oturum anahtarınızı girin" aria-describedby="key-help login-error" spellcheck="false" autocapitalize="none" autocorrect="off">
+              <button id="toggle-key" class="toggle-key" type="button" aria-label="Oturum anahtarını göster" aria-controls="session-key" aria-pressed="false" hidden>
+                <svg class="eye-open" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="eye-closed" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m3 3 18 18M10.6 5.1 12 5c6.5 0 10 7 10 7a22 22 0 0 1-3 4M6 6a23 23 0 0 0-4 6s3.5 7 10 7a13 13 0 0 0 5-1M10 10a3 3 0 0 0 4 4"/></svg>
+              </button>
+            </div>
+            <p id="key-help" class="field-help">Yöneticinizin size sağladığı kişisel erişim anahtarı.</p>
+            <p id="login-error" class="form-error" role="alert" aria-atomic="true"></p>
+            <noscript><p class="form-error">Güvenli giriş için tarayıcınızda JavaScript'i etkinleştirip sayfayı yenileyin.</p></noscript>
+            <button id="login-submit" class="submit-button" type="submit" disabled><span id="submit-label">Güvenli giriş yap</span><svg class="submit-arrow" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg><span class="spinner" aria-hidden="true" hidden></span></button>
+            <p id="login-status" class="sr-only" role="status" aria-live="polite"></p>
+          </form>
+
+          <div class="access-help"><h3>Anahtarınıza erişemiyor musunuz?</h3><p>Erişim anahtarınız için sistem yöneticinizle iletişime geçin.</p></div>
+          <div class="security-note"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg><span>Kişisel anahtar. Kontrollü erişim.</span></div>
+        </div>
+        <p class="access-caption">TRADEFORGE <span aria-hidden="true">/</span> GÜVENLİ ÇALIŞMA ALANI</p>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>Tradeforge <span class="footer-divider" aria-hidden="true">/</span> Trading intelligence, with discipline.</span><span>Analiz. Disiplin. Kontrol.</span></footer>
+  </div>
+</body>
+</html>

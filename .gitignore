@@ -1,0 +1,29 @@
+# Secrets and local state
+.env
+.env.*
+*.env
+!.env.example
+*.key
+*.pem
+/var/
+# Python and build outputs
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+dist/
+build/
+*.egg-info/
+# Local work notes and preserved pre-migration data (never runtime inputs)
+.phase00/
+.superpowers/
+/PROMPT.md
+/influxdb_data/
+# Plans stay local; root README and binding user rules are versioned.
+/docs/
+*.md
+!/README.md
+!/AGENTS.md

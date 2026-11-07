@@ -1,0 +1,1 @@
+"""Domain acceptance tests."""

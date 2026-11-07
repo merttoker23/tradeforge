@@ -1,0 +1,8 @@
+{$TF_DOMAIN} {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy dashboard:8104 {
+        header_up Host {$TF_DOMAIN}
+        header_up -Authorization
+    }
+}

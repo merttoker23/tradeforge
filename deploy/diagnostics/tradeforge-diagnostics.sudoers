@@ -1,0 +1,2 @@
+Defaults!/usr/local/sbin/tradeforge-production-diagnostics env_reset, !setenv
+codexops ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/tradeforge-production-diagnostics ""

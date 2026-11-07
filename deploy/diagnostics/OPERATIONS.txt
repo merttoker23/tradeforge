@@ -1,0 +1,138 @@
+Tradeforge bounded production diagnostics: administrator installation instructions
+
+These are reviewable instructions, not evidence of installation. No production
+commands, sudo, Docker, private exchange calls, grants or role creation were run
+to develop this helper. The helper itself never changes permissions or data.
+
+Scope and trust
+  Install production_diagnostics.py as exactly the single root-owned file below.
+  It imports only system stdlib with /usr/bin/python3 -I, imports no sibling/app
+  code and accepts zero arguments. Do not run it using a caller-selected Python.
+  All parent directories /usr, /usr/local and /usr/local/sbin must be root-owned,
+  non-symlink directories, with no group/other write permissions. The installed
+  helper must be root:root 0755, regular, single-link and not a symlink. Verify
+  the system Python and Docker binaries are administrator-managed as usual.
+  The helper ignores caller environment, uses cwd=/, disables stdin, uses fixed
+  absolute binaries and never executes a shell. Docker target IDs are validated
+  against project=forgetrade, working_dir=/opt/forgetrade and service allowlists.
+  It only performs fixed ps/inspect/image inspect/logs operations and fixed
+  per-service python -I -S -B localhost GETs or fixed local psql read-only SQL.
+
+Review and copy the exact candidate (administrator console, no automation):
+  /usr/bin/sha256sum /home/codexops/tradeforge-production-recovery-20261105/deploy/diagnostics/production_diagnostics.py
+  /usr/bin/namei -l /usr/local/sbin
+  /usr/bin/install -o root -g root -m 0755 -- /home/codexops/tradeforge-production-recovery-20261105/deploy/diagnostics/production_diagnostics.py /usr/local/sbin/tradeforge-production-diagnostics
+  /usr/bin/stat -c '%U:%G %a %h %F' /usr/local/sbin/tradeforge-production-diagnostics
+  /usr/bin/sha256sum /usr/local/sbin/tradeforge-production-diagnostics
+Compare source and installed SHA-256 values. If parent ownership/modes, file type,
+link count or permissions differ, stop and repair installation before granting
+sudo access. The administrator should stage/review a root-owned copy when the
+candidate workspace can be concurrently modified. Never import workspace code
+from a privileged wrapper. No supplementary configuration files are installed.
+
+Exact sudoers content (administrator writes /etc/sudoers.d/tradeforge-diagnostics):
+  Defaults!/usr/local/sbin/tradeforge-production-diagnostics env_reset, !setenv
+  codexops ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/tradeforge-production-diagnostics ""
+
+Exact administrator commands to prepare/validate/install that sudoers content:
+  /usr/bin/printf '%s\n' 'Defaults!/usr/local/sbin/tradeforge-production-diagnostics env_reset, !setenv' 'codexops ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/tradeforge-production-diagnostics ""' > /root/tradeforge-diagnostics.sudoers
+  /usr/sbin/visudo -cf /root/tradeforge-diagnostics.sudoers
+  /usr/bin/install -o root -g root -m 0440 -- /root/tradeforge-diagnostics.sudoers /etc/sudoers.d/tradeforge-diagnostics
+  /usr/sbin/visudo -cf /etc/sudoers
+  /usr/bin/sudo -l -U codexops
+The sudoers empty argument string allows only the argument-free invocation.
+Do not grant Docker group membership, docker/shell/python/psql sudo rights,
+SETENV, wildcards, arbitrary exec or access to another existing root helper.
+
+Optional separate administrator-only database access-control installation:
+  The source creates tf_dashboard, which has INSERT rights and is not a SELECT-only
+  role. The diagnostic never uses it or tradeforge_owner as a fallback.
+  Review access_setup.sql and execute it ONCE using the existing administrator's
+  normal database administration channel in the tradeforge database. Its exact
+  contents create tf_diagnostics with no password and narrowly scoped SELECT
+  grants; no new secret, pg_hba edit, network listener or application migration.
+  If tf_diagnostics already exists, CREATE ROLE fails and rolls back; inspect it
+  instead of dropping/replacing it. The helper verifies least-privilege properties
+  and memberships before reading aggregates. No sequence privileges are needed.
+  Existing local Unix-socket peer/trust authentication must already permit this
+  role. If it does not, leave database UNKNOWN; do not change pg_hba or use owner.
+  The fixed psql connection is /var/run/postgresql:5432, db=tradeforge,
+  user=tf_diagnostics, -X -w, cleared environment, no .pgpass/.psqlrc, a READ ONLY
+  repeatable-read transaction, 1200ms statement and 300ms lock timeout, ROLLBACK.
+  The existing PostgreSQL image must contain /usr/bin/env and /usr/bin/psql;
+  missing executable/socket/auth/role/schema/SELECT rights return UNKNOWN.
+
+Exact optional database setup commands, ONLY at an authorized administrator's
+root Bash console after reviewing the access_setup.sql file and this step:
+  /usr/bin/install -o root -g root -m 0600 -- /home/codexops/tradeforge-production-recovery-20261105/deploy/diagnostics/access_setup.sql /root/tradeforge-diagnostics-access.sql
+  /usr/bin/sha256sum /home/codexops/tradeforge-production-recovery-20261105/deploy/diagnostics/access_setup.sql /root/tradeforge-diagnostics-access.sql
+  diagnostics_postgres_id=$(/usr/bin/docker ps -q --no-trunc --filter label=com.docker.compose.project=forgetrade --filter label=com.docker.compose.service=postgres --filter label=com.docker.compose.project.working_dir=/opt/forgetrade)
+  [[ "$diagnostics_postgres_id" =~ ^[a-f0-9]{64}$ ]] || { /usr/bin/printf '%s\n' 'UNIQUE_POSTGRES_REQUIRED'; exit 1; }
+  diagnostics_postgres_scope=$(/usr/bin/docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}' "$diagnostics_postgres_id")
+  [[ "$diagnostics_postgres_scope" == 'forgetrade|/opt/forgetrade|postgres|true' ]] || { /usr/bin/printf '%s\n' 'POSTGRES_SCOPE_MISMATCH'; exit 1; }
+  /usr/bin/docker exec -i --user postgres --workdir / "$diagnostics_postgres_id" /usr/bin/env -i PATH=/usr/bin:/bin HOME=/ LC_ALL=C.UTF-8 PGCONNECT_TIMEOUT=2 PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PSQLRC=/dev/null /usr/bin/psql -X -w -v ON_ERROR_STOP=1 --host=/var/run/postgresql --port=5432 --username=tradeforge_owner --dbname=tradeforge --file=- < /root/tradeforge-diagnostics-access.sql
+These administrator-only commands explicitly use the database owner solely for
+the reviewed access-control CREATE ROLE/GRANT transaction. They are not part of
+the diagnostic's sudo allowance or runtime, and the agent must not execute them.
+If existing local authentication refuses the administrator or diagnostic role,
+leave database UNKNOWN. No password, alternate role or pg_hba fallback is allowed.
+runtime_queries.sql is the embedded fixed read transaction exported for review;
+the installed helper never reads it or any other mutable external configuration.
+
+After the administrator has installed and approved access, operator invocation:
+  /usr/bin/sudo -n -- /usr/local/sbin/tradeforge-production-diagnostics
+No flags, SQL, service selectors, URLs, paths, env settings or token input accepted.
+
+Output and limitations
+  DB failures include only a fixed failure code and failed_section when known.
+  Fixed SELECT markers identify the role gate or aggregate boundary; psql SQLSTATE
+  verbosity never returns raw error text. DB_QUERY_CANCELED does not assume a
+  timeout cause; DB_ROLE_POLICY_REJECTED is the least-privilege gate, not a request
+  for broader grants. If a role was already installed, do not rerun access setup
+  merely because status is UNKNOWN. Inspect the bounded failure code first.
+  If an aggregate is canceled after the role gate, only the same fixed SELECTs
+  are read separately, each with its own role gate and READ ONLY transaction.
+  The nine pipeline counts use separate statements with the original predicates.
+  Role checks and ordinary SELECTs keep1200ms. Only four production-measured
+  canceled reads (opportunities, regimes_72h, history_72h, history_revisions_72h)
+  receive a fixed10000ms statement limit AFTER their role gate. All300ms lock,
+  12s process and90s global limits remain unchanged. This diagnostic read budget
+  does not change an application, exchange, risk or authorization setting.
+  No retry occurs after role/auth/policy rejection. Unavailable counts stay null;
+  independently completed sections are OK, incomplete sections/snapshots PARTIAL.
+  These independent snapshots have different transaction times; compare their
+  timestamps and do not treat them as one atomic cross-service/72h observation.
+  One JSON snapshot, at most 96 KB; process output reads are capped incrementally
+  (including discarded stderr); each command has a <=12s deadline and the whole
+  helper a 90s alarm. It prints explicit UNKNOWN/null on missing evidence. Exit 0
+  means a snapshot was collected, not that services are ready or DB was readable.
+  Per-service metadata: state, running, image ID/digest/revision, started time,
+  restarts/OOM/health. Readiness and authenticated /market-state use only fixed
+  localhost ports inside the correct container, no proxy, redirect or exchange
+  call. The mounted gateway_token is read only inside that container, never sent
+  to the host, caller or logs. App imports, Binance endpoints and private account
+  queries are absent. App GET handlers may perform their existing internal DB
+  reads; the helper never invokes exchange clients or mutation endpoints.
+  Logs cover only 100 trailing lines in the last 15 minutes. Only structured,
+  typed allowed fields and exact known reason codes survive; free text, exception
+  strings, identifiers, symbol lists and unknown codes are discarded/redacted.
+  A nonempty discarded count is expected for unstructured/unknown application logs.
+  Database output distinguishes 72h transitions, unique decisions and latest
+  candidate states; event counts, stage last times, pending/delivered outbox and
+  current orders, regime samples/distinct source periods, canonical revisions
+  and 5m/15m/1h stored interior gap counts. Retention can remove historical bars;
+  these counts cannot prove full universe coverage or absence of edge-window gaps.
+  Runtime observations are CURRENT GAUGES, not a 72h frequency/time series. Latest
+  state/current tables can be older than 72h and are labeled separately.
+  Unknown/new reason codes become UNKNOWN, never arbitrary token-shaped text.
+  No account balances, order/client IDs, credentials, raw errors or raw logs appear.
+  Concurrent service changes or individual failures can produce a partial snapshot.
+  The helper itself is not installed and no administrator access is implied by
+  the presence of these files in a user-owned review workspace.
+
+Recovery-source additions (not installed automatically): canonical timeframe
+reason codes and correlated admission refusal aggregates; revision observations
+are preaggregated by instrument/timeframe/open_at before distinct totals. The
+fixed role/SELECT-only command surface, deadlines and output caps are unchanged.
+This query plan improvement is tested on disposable PostgreSQL; the four earlier
+production UNKNOWN aggregates remain UNKNOWN until a successful actual reading.

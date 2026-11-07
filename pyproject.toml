@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tradeforge"
+version = "2.0.0"
+description = "Tradeforge 2.0 strict domain contracts and fail-closed local runtime"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.12,<3",
+    "sqlalchemy>=2.0.46,<2.1",
+    "psycopg[binary]>=3.2.6,<4",
+    "alembic>=1.16,<2",
+    "aiohttp>=3.14.5,<4",
+]
+
+[dependency-groups]
+dev = [
+  "hatchling==1.27.0",
+  "mypy>=1.18,<2",
+  "pip-audit>=2.9,<3",
+  "pytest>=8.4,<10",
+  "pyyaml>=6.0.2,<7",
+  "ruff>=0.14,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tradeforge", "apps", "migrations"]
+
+[tool.uv]
+constraint-dependencies = ["certifi==2026.10.19"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra --strict-markers --strict-config"
+cache_dir = ".cache/pytest"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["docs/spec"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "apps", "tools", "migrations", "deploy/linux"]
+
+[[tool.mypy.overrides]]
+module = "yaml"
+ignore_missing_imports = true

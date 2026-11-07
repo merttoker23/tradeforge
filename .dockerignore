@@ -1,0 +1,12 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!apps/
+!apps/**
+!migrations/
+!migrations/**
+**/__pycache__/
+**/*.pyc

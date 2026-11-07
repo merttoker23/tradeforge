@@ -1,0 +1,164 @@
+name: tradeforge
+
+x-app: &app
+  image: tradeforge:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  init: true
+  user: "10001:10001"
+  read_only: true
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 1g
+  cpus: 1.5
+  stop_grace_period: 30s
+  environment: &environment
+    TRADEFORGE_MODE: paper
+    TRADEFORGE_LIVE: "false"
+  depends_on:
+    postgres: {condition: service_healthy}
+    migrate: {condition: service_completed_successfully}
+  logging: &logging
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tradeforge_owner
+      POSTGRES_DB: tradeforge
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+      TZ: UTC
+      PGTZ: UTC
+    command: [postgres, -c, timezone=UTC, -c, log_statement=none, -c, max_wal_size=512MB,
+              -c, min_wal_size=80MB, -c, max_slot_wal_keep_size=512MB, -c, wal_compression=on,
+              -c, autovacuum_vacuum_scale_factor=0.02, -c, autovacuum_analyze_scale_factor=0.01,
+              -c, autovacuum_naptime=30s]
+    secrets: [postgres_password]
+    volumes: [postgres_state:/var/lib/postgresql/data]
+    networks: [state]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U tradeforge_owner -d tradeforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+    shm_size: 128mb
+    logging: *logging
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [migrate]
+    depends_on:
+      postgres: {condition: service_healthy}
+    secrets: [postgres_password, market_password, quant_password, guardian_password, dashboard_password]
+    networks: [state]
+
+  market_gateway:
+    <<: *app
+    command: [market]
+    secrets: [market_password, gateway_token]
+    networks: [state, egress]
+    healthcheck:
+      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, market]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  quant_core:
+    <<: *app
+    command: [quant]
+    secrets: [quant_password, gateway_token]
+    networks: [state]
+    healthcheck:
+      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, quant]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  execution_guardian:
+    <<: *app
+    command: [guardian]
+    environment:
+      <<: *environment
+      TRADEFORGE_MODE: ${TF_MODE:-paper}
+      TF_DEMO_ORDERS: ${TF_DEMO_ORDERS:-false}
+      TF_DEMO_TRIAL: ${TF_DEMO_TRIAL:-false}
+    secrets: [guardian_password, gateway_token]
+    networks: [state, egress]
+    volumes: [postgres_state:/postgres-volume:ro]
+    healthcheck:
+      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, guardian]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  dashboard:
+    <<: *app
+    command: [dashboard]
+    environment:
+      <<: *environment
+      TF_DOMAIN: ${TF_DOMAIN:?set the HTTPS dashboard hostname}
+    secrets: [dashboard_password, dashboard_login, session_key, gateway_token]
+    networks: [state, web]
+    healthcheck:
+      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, dashboard]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    ports: ["80:80", "443:443"]
+    environment:
+      TF_DOMAIN: ${TF_DOMAIN:?set the HTTPS dashboard hostname}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web, egress]
+    depends_on:
+      dashboard: {condition: service_started}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:2019/config/]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+
+networks:
+  state: {internal: true}
+  web: {internal: true}
+  egress: {}
+volumes:
+  postgres_state:
+  caddy_data:
+  caddy_config:
+secrets:
+  postgres_password: {file: "${TF_SECRETS_DIR:?set a private Linux secret directory}/postgres_password"}
+  market_password: {file: "${TF_SECRETS_DIR}/market_password"}
+  quant_password: {file: "${TF_SECRETS_DIR}/quant_password"}
+  guardian_password: {file: "${TF_SECRETS_DIR}/guardian_password"}
+  dashboard_password: {file: "${TF_SECRETS_DIR}/dashboard_password"}
+  gateway_token: {file: "${TF_SECRETS_DIR}/gateway_token"}
+  dashboard_login: {file: "${TF_SECRETS_DIR}/dashboard_login"}
+  session_key: {file: "${TF_SECRETS_DIR}/session_key"}
