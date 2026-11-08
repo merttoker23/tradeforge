@@ -65,7 +65,7 @@ def grant_runtime_access(c: Connection, database_name: str) -> None:
         f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {names}",
         "GRANT INSERT ON instruments,universe_snapshots,closed_bars,closed_bar_observations,"
         "terminal_chart_cache,runtime_observations TO tf_market",
-        "GRANT UPDATE ON runtime_observations,terminal_chart_cache TO tf_market",
+        "GRANT UPDATE ON runtime_observations,terminal_chart_cache,closed_bars TO tf_market",
         "GRANT INSERT ON regime_snapshots,opportunities,runtime_observations,"
         "decision_lifecycle,audit_log TO tf_quant",
         "GRANT UPDATE ON runtime_observations TO tf_quant",

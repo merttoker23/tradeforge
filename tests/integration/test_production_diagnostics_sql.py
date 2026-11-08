@@ -334,9 +334,11 @@ def test_revision_aggregate_reduces_duplicate_versions_before_distinct_sort(
             c.execute(
                 text("""
                 INSERT INTO closed_bar_observations
-                  (instrument_id,timeframe,open_at,close_at,source_at,observed_at,payload,input_hash)
+                  (instrument_id,timeframe,open_at,close_at,source_at,observed_at,
+                   payload,input_hash,content_hash)
                 SELECT :id,:tf,opened,opened+interval '5 minutes',opened+interval '5 minutes',
                   now()-interval '2 hours'+revision*interval '1 millisecond','{}',
+                  encode(sha256(convert_to('{}','UTF8')),'hex'),
                   encode(sha256(convert_to('{}','UTF8')),'hex')
                 FROM (SELECT now()-interval '1 day'+n*interval '15 minutes' AS opened
                       FROM generate_series(1,3) n) bars

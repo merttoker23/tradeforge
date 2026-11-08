@@ -189,17 +189,23 @@ class MarketGateway:
         )
 
     def symbol_ready(self, symbol: str) -> bool:
-        """Symbol evidence is independent of unrelated changed-only ticker members."""
+        """Symbol evidence is independent of unrelated changed-only ticker members.
+
+        Only activated streams (present in ``_generations``) block readiness; a
+        planned but not yet connected stream must not hold a symbol back.
+        """
         return bool(
             self.status()["data_ready"]
             and symbol in self.eligible
-            and all(self.fresh(name, symbol) for name in GLOBAL_STREAMS)
+            and all(
+                self.fresh(name, symbol) for name in GLOBAL_STREAMS if name in self._generations
+            )
             and self.plan is not None
             and all(
                 self.fresh(s.name, symbol)
                 for group in self.plan.groups
                 for s in group
-                if s.symbol == symbol
+                if s.symbol == symbol and s.name in self._generations
             )
             and self.canonical.symbol_ready(symbol, self.clock())
         )

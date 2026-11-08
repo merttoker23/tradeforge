@@ -349,7 +349,6 @@ class GatewayPersistence:
                                     save_view,
                                     self.db,
                                     state.view(key, Timeframe.M15, self.gateway.clock()),
-                                    persist_features=False,
                                 )
                             if valid():
                                 completed.add(key.symbol)

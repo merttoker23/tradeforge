@@ -43,8 +43,9 @@ def seed(db, count=8, periods=40):
         connection.execute(
             text("""
             INSERT INTO closed_bar_observations
-            (instrument_id,timeframe,open_at,close_at,source_at,observed_at,payload,input_hash)
-            VALUES(:id,:tf,:open,:close,:source,:observed,:payload,:hash)
+            (instrument_id,timeframe,open_at,close_at,source_at,observed_at,
+             payload,input_hash,content_hash)
+            VALUES(:id,:tf,:open,:close,:source,:observed,:payload,:hash,:hash)
         """),
             rows,
         )
@@ -100,7 +101,8 @@ def test_unchanged_history_reuses_parsed_rows_and_reports_bounded_work(migrated)
     assert first["history_rows"] == len(samples) * 33
     assert first["history_parsed"] == len(samples) * 33
     second = worker.tick()
-    assert second["history_rows"] == len(samples) * 33
+    # Only the short overlap window is re-read; full 33-bar history is not.
+    assert 0 < second["history_rows"] <= len(samples)
     assert second["history_parsed"] == 0
     assert second["processed"] == 0
     assert second["tick_ms"] >= second["history_query_ms"] >= 0

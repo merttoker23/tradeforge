@@ -39,8 +39,8 @@ class CanonicalFeed:
     def __init__(
         self,
         *,
-        capacity: int = 2048,
-        max_symbols: int = 256,
+        capacity: int = 96,
+        max_symbols: int = 1024,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.state = MarketState(capacity, max_series=max_symbols * 3)

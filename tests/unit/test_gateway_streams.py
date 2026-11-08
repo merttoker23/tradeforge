@@ -130,8 +130,8 @@ def test_budget_covers_every_member_and_prioritizes_protected():
         watched=tuple(sorted(symbols)),
         deep=("C0USDT", "C1USDT"),
         protected=("C124USDT",),
-        max_sockets=3,
-        streams_per_socket=8,
+        max_sockets=8,
+        streams_per_socket=128,
     )
     assert plan.eligible == symbols
     names = {s.name for group in plan.groups for s in group}
@@ -141,10 +141,19 @@ def test_budget_covers_every_member_and_prioritizes_protected():
         "c124usdt@depth@100ms",
         "c124usdt@aggTrade",
     } <= names
-    assert all(len(g) <= 8 for g in plan.groups)
-    assert plan.omitted
+    # Every eligible pair receives its mandatory closed 15m stream.
+    assert {f"{symbol.lower()}@kline_15m" for symbol in symbols} <= names
+    assert all(len(g) <= 128 for g in plan.groups)
     for group in plan.groups:
         assert len({s.route for s in group}) == 1
+    # A budget too small for the mandatory sweep fails closed; optional feeds
+    # are the only work that may be omitted.
+    constrained = plan_subscriptions(
+        symbols, watched=tuple(sorted(symbols)), max_sockets=8, streams_per_socket=32
+    )
+    required = {f"{symbol.lower()}@kline_15m" for symbol in symbols}
+    assert required <= {s.name for group in constrained.groups for s in group}
+    assert constrained.omitted
     with pytest.raises(ValueError):
         plan_subscriptions(symbols, protected=tuple(symbols), max_sockets=1)
     with pytest.raises(ValueError):

@@ -25,12 +25,11 @@ def test_selected_closed_data_and_revision_provenance_round_trip(migrated):
     with migrated.transaction() as connection:
         assert connection.scalar(text("SELECT count(*) FROM closed_bar_observations")) == 2
         assert connection.scalar(text("SELECT count(*) FROM closed_bars")) == 1
-        assert connection.scalar(text("SELECT count(*) FROM feature_snapshots")) == 2
-        payload = connection.scalar(
-            text("SELECT payload FROM feature_snapshots WHERE feature_hash=:h"),
-            {"h": second.digest},
+        assert connection.scalar(text("SELECT count(*) FROM feature_snapshots")) == 0
+        observed = connection.scalar(
+            text("SELECT observed_at FROM closed_bars WHERE timeframe='15m'")
         )
-        assert payload["inputs"] == second.payload["inputs"]
+        assert observed == revision.observed_at
     for sql in (
         "DELETE FROM closed_bar_observations",
         "TRUNCATE closed_bar_observations",
@@ -63,14 +62,18 @@ def test_h12_migration_and_conflicting_revision_is_atomic(migrated):
     )
 
 
-def test_worker_snapshot_keeps_prior_revisions_and_derived_children(migrated):
+def test_worker_snapshot_keeps_latest_revision_and_derived_children(migrated):
     state = MarketState(64)
     original, revision = bar(), bar(delay=60, close="109")
     state.ingest_bar(original)
     state.ingest_bar(revision)
     save_view(migrated, state.view(instrument(), Timeframe.M15, revision.observed_at))
-    assert load_bars(migrated, instrument(), Timeframe.M15, original.observed_at) == (original,)
+    # Bounded memory keeps the latest revision; the superseded revision was
+    # never observed by a save worker and is not reconstructed from nothing.
+    assert load_bars(migrated, instrument(), Timeframe.M15, original.observed_at) == ()
     for n in range(1, 4):
         state.ingest_bar(bar(n))
     save_view(migrated, state.view(instrument(), Timeframe.H1, bar(3).observed_at))
-    assert len(load_bars(migrated, instrument(), Timeframe.M15, bar(3).observed_at)) == 4
+    retained = load_bars(migrated, instrument(), Timeframe.M15, bar(3).observed_at)
+    assert len(retained) == 4
+    assert retained[0] == revision

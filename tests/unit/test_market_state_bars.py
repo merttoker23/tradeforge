@@ -30,11 +30,13 @@ def test_revisions_dedup_and_no_future_data_leak():
     assert window.add(original)
     assert not window.add(original)
     assert window.add(revision)
-    assert window.at(original.observed_at) == (original,)
+    # Latest revision wins in bounded memory; a past frame is never rewritten
+    # with a revision that was not observed at that time.
+    assert window.at(original.observed_at) == ()
     assert window.at(revision.observed_at) == (revision,)
     assert window.at(original.observed_at - timedelta(milliseconds=1)) == ()
     with pytest.raises(ValueError, match="CONFLICT"):
-        window.add(bar(close="106"))
+        window.add(bar(delay=300, close="106"))
 
 
 def test_out_of_order_and_bounded_retention_fail_closed():
@@ -78,16 +80,20 @@ def test_snapshot_hash_and_replay_determinism_and_gap():
     assert a.bars[0].close == 105
 
 
-def test_resampled_revisions_never_rewrite_past():
+def test_resampled_revision_updates_latest_and_never_leaks_backwards():
     state = MarketState(64)
     children = [bar(i) for i in range(4)]
     for child in children:
         state.ingest_bar(child)
     at = children[-1].observed_at
     before = state.view(instrument(), Timeframe.H1, at)
-    state.ingest_bar(bar(0, delay=4000, close="109"))
-    assert state.view(instrument(), Timeframe.H1, at).digest == before.digest
+    revised = bar(3, delay=4000, close="109")
+    state.ingest_bar(revised)
+    after = state.view(instrument(), Timeframe.H1, revised.observed_at)
+    assert after.bars[0].close == 109
     assert before.bars[0].source.startswith("resample:")
+    # The earlier frame cannot be reconstructed from a revision observed later.
+    assert state.view(instrument(), Timeframe.H1, at).bars == ()
 
 
 def test_retention_edge_does_not_poison_complete_recent_resample():

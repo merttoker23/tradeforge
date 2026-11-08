@@ -50,10 +50,14 @@ def plan_subscriptions(
 
     for name in GLOBAL_STREAMS:
         add(StreamSpec(name), True)
+    # Every eligible pair must deliver its closed 15m bar. Optional tiers only
+    # add higher-frequency or depth evidence on top of this mandatory sweep.
+    for symbol in sorted(eligible):
+        add(StreamSpec(f"{symbol.lower()}@kline_15m"), True)
     for symbols, required, suffixes in (
         (protected, True, ("bookTicker", "depth@100ms", "aggTrade")),
         (deep, False, ("bookTicker", "depth@100ms", "aggTrade")),
-        (watched, False, ("bookTicker", "kline_1m", "kline_5m", "kline_15m")),
+        (watched, False, ("bookTicker", "kline_1m", "kline_5m")),
     ):
         for symbol in dict.fromkeys(symbols):
             for suffix in suffixes:

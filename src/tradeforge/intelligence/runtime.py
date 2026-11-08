@@ -17,7 +17,7 @@ from tradeforge.intelligence.opportunity import SurveillancePolicy
 from tradeforge.intelligence.ranking import rank_market
 from tradeforge.intelligence.regime import RegimeEngine
 from tradeforge.intelligence.warmup import seed_history
-from tradeforge.market.bars import canonical
+from tradeforge.market.bars import bar_content_hash, bar_hash, canonical
 from tradeforge.market.instrument_registry import InstrumentRegistry
 from tradeforge.persistence.db import Database
 from tradeforge.persistence.repositories import instrument_id
@@ -25,9 +25,10 @@ from tradeforge.runtime.progress import RuntimeProgress
 from tradeforge.runtime.storage import save_runtime
 
 HISTORY_QUERY = text("""
-                SELECT bars.input_hash,bars.payload FROM unnest(CAST(:ids AS uuid[])) AS ids(id)
+                SELECT bars.input_hash,bars.content_hash,bars.observed_at,bars.payload
+                FROM unnest(CAST(:ids AS uuid[])) AS ids(id)
                 CROSS JOIN LATERAL (
-                    SELECT DISTINCT ON(open_at) input_hash,payload,open_at
+                    SELECT DISTINCT ON(open_at) input_hash,content_hash,observed_at,payload,open_at
                     FROM closed_bar_observations
                     WHERE instrument_id=ids.id AND timeframe=:tf
                         AND observed_at<=:at AND close_at<=:at
@@ -35,6 +36,18 @@ HISTORY_QUERY = text("""
                 ) bars
                 ORDER BY ids.id,bars.open_at
             """)
+
+# Count probe: detects any change (new bars, revisions, backfills) in the
+# observable history for our instruments without returning full row payloads.
+COUNT_PROBE = text("""
+            SELECT count(*) FROM closed_bar_observations bars
+            WHERE bars.instrument_id IN (
+                SELECT id FROM unnest(CAST(:ids AS uuid[])) AS ids(id))
+                AND bars.timeframe=:tf
+                AND bars.observed_at<=:at AND bars.close_at<=:at
+        """)
+
+MAX_OPPORTUNITIES = 64
 
 
 class QuantWorker:
@@ -55,7 +68,12 @@ class QuantWorker:
         self.market_samples: tuple[MarketSnapshot, ...] | None = None
         self.progress = RuntimeProgress(clock=clock)
         self.history_metrics: dict[str, int | float] = {}
+        self._rings: dict[tuple[str, ...], dict[datetime, ClosedBar]] = {}
         self._bar_cache: dict[str, ClosedBar] = {}
+        self._max_observed_at: datetime | None = None
+        self._db_total_count: int | None = None
+        self._history_dirty = True
+        self._last_persisted_version: str | None = None
         self._history_version: str | None = None
         self._history_signature: tuple[str, ...] | None = None
         self._analyzed_history_signature: tuple[str, ...] | None = None
@@ -110,8 +128,73 @@ class QuantWorker:
             )
         self.loaded = True
 
+    @property
+    def _history_limit(self) -> int:
+        return self.detector.policy.window + 1
+
+    def _parse(self, row: Any, now: datetime) -> ClosedBar:
+        bar = self._bar_cache.get(row.input_hash)
+        if bar is None:
+            bar = ClosedBar.model_validate_json(row.payload, context={"now": now})
+            self._bar_cache[row.input_hash] = bar
+            self.history_metrics["history_parsed"] = (
+                self.history_metrics.get("history_parsed", 0) + 1
+            )
+        if bar.as_of > now:
+            raise ValueError("FUTURE_HISTORY_INPUT")
+        return bar
+
+    def _store(self, bar: ClosedBar, input_hash: str) -> None:
+        ring = self._rings.setdefault(bar.key, {})
+        old = ring.get(bar.open_at)
+        if old is not None:
+            if bar.observed_at < old.observed_at or old == bar:
+                return
+            if bar.observed_at == old.observed_at:
+                raise ValueError("CONFLICTING_HISTORY_REVISION")
+        elif len(ring) >= self._history_limit:
+            oldest = min(ring)
+            if bar.open_at <= oldest:
+                return
+            removed = ring.pop(oldest)
+            self._bar_cache.pop(bar_hash(removed), None)
+        if old is not None:
+            self._bar_cache.pop(bar_hash(old), None)
+        ring[bar.open_at] = bar
+        self._bar_cache[input_hash] = bar
+        self._history_dirty = True
+
+    def _load_full(self, rows: tuple[Any, ...] | list[Any], now: datetime) -> None:
+        self._rings.clear()
+        # _bar_cache is intentionally preserved: parsed bars are reused by
+        # input_hash identity across ticks, so only new rows are decoded.
+        for row in rows:
+            bar = self._parse(row, now)
+            self._rings.setdefault(bar.key, {})[bar.open_at] = bar
+        if rows:
+            self._max_observed_at = max(row.observed_at for row in rows)
+        self._history_dirty = True
+
+    def _signature(self, rows: tuple[Any, ...] | list[Any]) -> tuple[str, ...]:
+        return tuple(sorted(row.content_hash for row in rows))
+
+    def _current_signature(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(bar_content_hash(bar) for ring in self._rings.values() for bar in ring.values())
+        )
+
+    def _refresh_history(self) -> None:
+        if not self._history_dirty:
+            return
+        self.history = [
+            bar for key in sorted(self._rings) for _, bar in sorted(self._rings[key].items())
+        ]
+        self._history_signature = self._current_signature()
+        self._history_dirty = False
+
     def _frame(self, now: datetime) -> tuple[MarketFrame | None, str]:
         self.rebuild_current = False
+        self.history_metrics["history_parsed"] = 0
         self.progress.advance("UNIVERSE_INPUT")
         view = InstrumentRegistry(self.db).view(now)
         if not view.ready or view.observation is None or view.observation.universe is None:
@@ -121,7 +204,13 @@ class QuantWorker:
             return None, "SYMBOL_BUDGET_EXHAUSTED"
         metadata_changed = self._history_version != universe.version_hash
         if metadata_changed:
-            self._bar_cache = {}
+            self._rings.clear()
+            self._bar_cache.clear()
+            self._max_observed_at = None
+            self._db_total_count = None
+            self._history_signature = None
+            self._analyzed_history_signature = None
+            self._history_dirty = True
         self._history_version = universe.version_hash
         with self.db.transaction() as c:
             sweep = c.execute(
@@ -150,28 +239,86 @@ class QuantWorker:
             # 33 closed periods; unrelated symbols and old retained history do
             # not join a global sort on every two-second analysis tick.
             identifiers = [instrument_id(k) for k in universe.eligible]
+            timeframe = self.detector.policy.timeframe
             if self._analyzed_history_signature is None and self.detector.latest is not None:
                 previous_rows = c.execute(
                     HISTORY_QUERY,
                     {
                         "ids": identifiers,
-                        "tf": self.detector.policy.timeframe.value,
+                        "tf": timeframe.value,
                         "at": self.detector.latest.frame.as_of,
                     },
                 ).all()
-                self._analyzed_history_signature = tuple(row.input_hash for row in previous_rows)
-            rows = c.execute(
-                HISTORY_QUERY,
-                {
-                    "ids": identifiers,
-                    "tf": self.detector.policy.timeframe.value,
-                    "at": now,
-                },
-            ).all()
-            self.history_metrics.update(
-                history_query_ms=round((time.perf_counter() - query_started) * 1000, 3),
-                history_rows=len(rows),
-            )
+                self._analyzed_history_signature = self._signature(list(previous_rows))
+            # Change detection: compare the live DB count against the count
+            # captured at the last full load. Any difference means new,
+            # revised, or backfilled evidence arrived and we must reload the
+            # bounded window. When the count is unchanged, only an incremental
+            # probe for recently observed revisions is needed.
+            live_count = c.execute(
+                COUNT_PROBE,
+                {"ids": identifiers, "tf": timeframe.value, "at": now},
+            ).scalar()
+            if self._db_total_count is None or live_count != self._db_total_count:
+                # Full bounded reload: first load, metadata change, or
+                # evidence count changed (new/backfilled/revised bars).
+                rows = c.execute(
+                    HISTORY_QUERY,
+                    {"ids": identifiers, "tf": timeframe.value, "at": now},
+                ).all()
+                self._load_full(list(rows), now)
+                self._db_total_count = live_count
+                self.history_metrics.update(
+                    history_query_ms=round((time.perf_counter() - query_started) * 1000, 3),
+                    history_rows=len(rows),
+                    history_new_rows=len(rows),
+                    history_backfill_count=0,
+                )
+            else:
+                # Count unchanged: probe only for recently observed revisions.
+                # _db_total_count is not None here, so a full load has run and
+                # _max_observed_at is set.
+                assert self._max_observed_at is not None
+                cursor = self._max_observed_at - timedelta(seconds=max(60, timeframe.seconds // 4))
+                new_rows = c.execute(
+                    text("""
+                        SELECT bars.input_hash,bars.content_hash,bars.observed_at,bars.payload
+                        FROM closed_bar_observations bars
+                        WHERE bars.instrument_id IN (
+                            SELECT id FROM unnest(CAST(:ids AS uuid[])) AS ids(id))
+                            AND bars.timeframe=:tf
+                            AND bars.observed_at>:cursor AND bars.observed_at<=:at
+                            AND bars.close_at<=:at
+                        ORDER BY bars.instrument_id,bars.open_at,bars.observed_at
+                    """),
+                    {"ids": identifiers, "tf": timeframe.value, "at": now, "cursor": cursor},
+                ).all()
+                if new_rows:
+                    # Merge new/revised observations into the bounded rings.
+                    parsed = 0
+                    for row in new_rows:
+                        if row.input_hash not in self._bar_cache:
+                            parsed += 1
+                        bar = self._parse(row, now)
+                        self._store(bar, row.input_hash)
+                        self._max_observed_at = max(
+                            self._max_observed_at or row.observed_at, row.observed_at
+                        )
+                    self._history_dirty = True
+                    self.history_metrics.update(
+                        history_query_ms=round((time.perf_counter() - query_started) * 1000, 3),
+                        history_rows=len(new_rows),
+                        history_new_rows=len(new_rows),
+                        history_backfill_count=0,
+                        history_parsed=parsed,
+                    )
+                else:
+                    self.history_metrics.update(
+                        history_query_ms=round((time.perf_counter() - query_started) * 1000, 3),
+                        history_rows=0,
+                        history_new_rows=0,
+                        history_backfill_count=0,
+                    )
             markets = c.execute(
                 text(
                     "SELECT instrument_id,payload FROM runtime_market "
@@ -192,37 +339,23 @@ class QuantWorker:
                 if m.observed_at <= now and 0 <= (now - m.source_at).total_seconds() <= 15
             }
         allowed = {k.key: k for k in universe.eligible}
-        series: dict[tuple[str, ...], list[ClosedBar]] = {}
         self.progress.advance("HISTORY_PARSE")
         parse_started = time.perf_counter()
-        signature = tuple(row.input_hash for row in rows)
+        self._refresh_history()
+        signature = self._history_signature or ()
         history_changed = (
             self._analyzed_history_signature is not None
             and signature != self._analyzed_history_signature
         )
-        parsed: dict[str, ClosedBar] = {}
-        self.history = []
-        parsed_count = 0
-        for row in rows:
-            bar = self._bar_cache.get(row.input_hash)
-            if bar is None:
-                bar = ClosedBar.model_validate_json(row.payload, context={"now": now})
-                parsed_count += 1
-            if bar.as_of > now:
-                raise ValueError("FUTURE_HISTORY_INPUT")
-            if bar.key[:-1] in allowed:
-                series.setdefault(bar.key, []).append(bar)
-                self.history.append(bar)
-                parsed[row.input_hash] = bar
-        self._bar_cache = parsed
-        self._history_signature = signature
+        series: dict[tuple[str, ...], list[ClosedBar]] = {
+            key: list(ring.values()) for key, ring in self._rings.items() if key[:-1] in allowed
+        }
         self.history_metrics.update(
-            history_parsed=parsed_count,
             history_parse_ms=round((time.perf_counter() - parse_started) * 1000, 3),
         )
         seconds = self.detector.policy.timeframe.seconds
         current_close = datetime.fromtimestamp(
-            int(now.timestamp() - 2) // seconds * seconds, UTC
+            int(now.timestamp()) // seconds * seconds, UTC
         ) - timedelta(milliseconds=1)
         current_members = 0
         for bars in series.values():
@@ -238,10 +371,9 @@ class QuantWorker:
             history_current_members=current_members,
             history_current_coverage=current_coverage,
         )
-        # An unfinished global sweep is not an analysis barrier once enough
-        # members prove the same finalized current period. Older members never
-        # count toward this bypass, even within the normal analysis age limit.
-        if sweep_incomplete and current_coverage < self.detector.policy.minimum_coverage:
+        # Analysis is fail-closed until enough eligible members prove the same
+        # finalized period. A partial sweep must never publish a regime.
+        if current_coverage < self.detector.policy.minimum_coverage:
             return None, "WAITING_HISTORY_SWEEP"
         closed = (
             current_close
@@ -273,13 +405,9 @@ class QuantWorker:
             }
             previous_cost = {f.instrument.key: f for f in self.detector.latest.features}
             fresh_cost = {m.key: m for m in quotes.values() if m.quality is DataQuality.OK}
-            # Changed-only partial quote sets may alternate forever. Enrich on
-            # improved coverage, or coalesce equal/lower coverage for 15 seconds.
-            # Candle revisions/new closes above are never delayed by this limit.
-            enrich_cost = (
-                len(fresh_cost) > len(known_stress)
-                or (now - self.detector.latest.frame.as_of).total_seconds() >= 15
-            )
+            # Cost evidence repairs a period only on improved coverage or a new
+            # stress observation. Time alone must never rewrite a closed bar.
+            enrich_cost = len(fresh_cost) > len(known_stress)
             policy = self.detector.policy
             for cost_key, cost_sample in fresh_cost.items():
                 before = previous_cost.get(cost_key)
@@ -392,8 +520,13 @@ class QuantWorker:
 
     def _persist(self, snapshot: FeatureSnapshot) -> None:
         at = snapshot.state.as_of
+        if snapshot.input_version == self._last_persisted_version:
+            return
         identifier = uuid5(NAMESPACE_URL, snapshot.input_version)
         ranked = rank_market(snapshot, SurveillancePolicy(), now=at)
+        # Evidence storage is bounded: only the highest-priority candidates are
+        # retained per regime snapshot instead of every eligible symbol.
+        selected = ranked[:MAX_OPPORTUNITIES]
         expiry = snapshot.frame.source_at + timedelta(
             seconds=snapshot.policy.timeframe.seconds * snapshot.policy.max_age_periods
         )
@@ -410,7 +543,7 @@ class QuantWorker:
                     "payload": canonical(snapshot.model_dump(mode="json")),
                 },
             )
-            for row in ranked:
+            for row in selected:
                 payload = {
                     **row.model_dump(mode="json"),
                     "source_at": snapshot.frame.source_at.isoformat(),
@@ -432,6 +565,7 @@ class QuantWorker:
                         "payload": canonical(payload),
                     },
                 )
+        self._last_persisted_version = snapshot.input_version
 
     def tick(self, *, persist: bool = True) -> dict[str, Any]:
         now = utc(self.clock())

@@ -21,6 +21,14 @@ def bar_hash(bar: ClosedBar) -> str:
     return hashlib.sha256(canonical(bar.model_dump(mode="json")).encode()).hexdigest()
 
 
+def bar_content_hash(bar: ClosedBar) -> str:
+    """Semantic bar identity: re-observations of identical content are not revisions."""
+    bar_data = bar.model_dump(mode="json")
+    for key in ("event_id", "observed_at", "as_of"):
+        bar_data.pop(key, None)
+    return hashlib.sha256(canonical(bar_data).encode()).hexdigest()
+
+
 def make_bar(
     key: InstrumentKey,
     timeframe: Timeframe,

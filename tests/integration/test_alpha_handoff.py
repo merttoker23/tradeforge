@@ -20,19 +20,16 @@ def test_later_persisted_candle_revision_cannot_poison_current_feature_input(mig
     save_view(
         migrated,
         BarView(key, Timeframe.M15, sample.as_of, sample.medium_bars, DataQuality.OK),
-        persist_features=False,
     )
     save_view(
         migrated,
         BarView(key, Timeframe.M5, sample.as_of, sample.setup_bars, DataQuality.OK),
-        persist_features=False,
     )
     later = sample.as_of + timedelta(seconds=1)
     revision = change(sample.medium_bars[-1], observed_at=later, as_of=later)
     save_view(
         migrated,
         BarView(key, Timeframe.M15, later, (revision,), DataQuality.OK),
-        persist_features=False,
     )
     feed = feed_for(sample)
     feed["as_of"] = later.isoformat()
@@ -66,12 +63,10 @@ def test_bounded_medium_history_keeps_complete_hourly_confirmation(
     save_view(
         migrated,
         BarView(sample.instrument, Timeframe.M15, at, medium, DataQuality.OK),
-        persist_features=False,
     )
     save_view(
         migrated,
         BarView(sample.instrument, Timeframe.M5, at, sample.setup_bars, DataQuality.OK),
-        persist_features=False,
     )
     feed = feed_for(sample)
     feed["as_of"] = at.isoformat()
@@ -168,7 +163,6 @@ def test_hourly_window_reaches_durable_armed_candidate_with_current_evidence(mig
         save_view(
             migrated,
             BarView(sample.instrument, timeframe, at, bars, DataQuality.OK),
-            persist_features=False,
         )
     inputs = alpha_inputs(migrated, features, feed)
     worker = AutonomousAnalysis(migrated, clock=lambda: at)

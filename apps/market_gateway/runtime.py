@@ -111,7 +111,7 @@ async def canonical_cycle(
     gateway.canonical.admission_ready = True
     await gateway.canonical.maintain(
         recovery,
-        lambda view: save_view(database, view, persist_features=False),
+        lambda view: save_view(database, view),
         gateway.clock(),
         recover_depth=False,
     )

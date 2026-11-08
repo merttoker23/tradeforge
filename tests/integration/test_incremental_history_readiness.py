@@ -76,7 +76,6 @@ def test_incomplete_sweep_uses_only_sufficient_current_period_members(migrated, 
             BarView(
                 sample.instrument, sample.current.timeframe, now, (sample.current,), sample.quality
             ),
-            persist_features=False,
         )
     save_runtime(
         migrated,
@@ -167,7 +166,6 @@ def test_cost_refresh_reuses_only_identical_closed_history_seed(migrated, monkey
     save_view(
         migrated,
         BarView(samples[0].instrument, revised.timeframe, at[0], (revised,), samples[0].quality),
-        persist_features=False,
     )
     assert worker.tick()["processed"] == 1
     assert len(calls) == 2

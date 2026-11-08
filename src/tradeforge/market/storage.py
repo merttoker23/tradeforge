@@ -1,87 +1,84 @@
 """Explicit selected market persistence; call on a worker, never the ingest loop."""
 
 from datetime import datetime
-from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import text
 
 from tradeforge.domain.common import utc
 from tradeforge.domain.instrument import InstrumentKey
 from tradeforge.domain.market import ClosedBar, Timeframe
-from tradeforge.market.bars import bar_hash, canonical
+from tradeforge.market.bars import bar_content_hash, bar_hash, canonical
 from tradeforge.market.market_state import BarView
 from tradeforge.persistence.db import Database
 from tradeforge.persistence.repositories import add_instrument, instrument_id
 
-STORED_OBSERVATIONS = text("""
-    SELECT stored.input_hash
+# A semantic content hash removes observation time and transport identity from
+# revision identity. Re-observing identical OHLCV is not a new revision.
+STORED_CONTENT = text("""
+    SELECT r.content_hash
     FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
-      timeframe text,open_at timestamptz,observed_at timestamptz,input_hash text)
-    CROSS JOIN LATERAL (
-      SELECT observed_at,input_hash FROM closed_bar_observations
-      WHERE instrument_id=:id AND timeframe=r.timeframe
-        AND open_at=r.open_at AND observed_at<=r.observed_at
-      ORDER BY observed_at DESC
-      LIMIT 1
-    ) stored
-    WHERE stored.observed_at=r.observed_at AND stored.input_hash=r.input_hash
+      timeframe text,open_at timestamptz,content_hash text)
+    WHERE EXISTS (
+      SELECT 1 FROM closed_bar_observations o
+      WHERE o.instrument_id=:id AND o.timeframe=r.timeframe
+        AND o.open_at=r.open_at AND o.content_hash=r.content_hash
+    )
 """)
 
 
-def save_view(db: Database, view: BarView, *, persist_features: bool = True) -> None:
-    """Atomic append-only observation + feature provenance, idempotent exact replay."""
+def save_view(db: Database, view: BarView) -> None:
+    """Persist changed bar revisions atomically; identical re-observations are free."""
     utc(view.as_of)
     with db.transaction() as connection:
         identifier = add_instrument(connection, view.instrument)
         bars = tuple(dict.fromkeys((*view.evidence, *view.bars)))
-        hashed = [(bar, bar_hash(bar)) for bar in bars]
+        hashed = [(bar, bar_hash(bar), bar_content_hash(bar)) for bar in bars]
         if any(bar.as_of > view.as_of or bar.key[:-1] != view.instrument.key for bar in bars):
             raise ValueError("SNAPSHOT_INPUT_MISMATCH")
-        stored_hashes: set[str] = set()
         for offset in range(0, len(hashed), 512):
+            batch = hashed[offset : offset + 512]
             keys = [
                 {
                     "timeframe": bar.timeframe.value,
                     "open_at": bar.open_at.isoformat(),
-                    "observed_at": bar.observed_at.isoformat(),
-                    "input_hash": digest,
+                    "content_hash": content,
                 }
-                for bar, digest in hashed[offset : offset + 512]
+                for bar, _, content in batch
             ]
-            stored_hashes.update(
-                connection.scalars(STORED_OBSERVATIONS, {"id": identifier, "rows": canonical(keys)})
-            )
-        pending = [
-            {
-                **bar.model_dump(mode="json"),
-                "payload": canonical(bar.model_dump(mode="json")),
-                "input_hash": digest,
-            }
-            for bar, digest in hashed
-            if digest not in stored_hashes
-        ]
-        # Bounded recordsets preserve the append-only revision checks without
-        # three network round trips per candle on a throttled database.
-        for offset in range(0, len(pending), 512):
-            batch = pending[offset : offset + 512]
-            params = {
-                "id": identifier,
-                "rows": canonical(batch),
-            }
+            params = {"id": identifier, "rows": canonical(keys)}
+            stored = set(connection.scalars(STORED_CONTENT, params))
+            pending = [
+                {
+                    **bar.model_dump(mode="json"),
+                    "payload": canonical(bar.model_dump(mode="json")),
+                    "input_hash": digest,
+                    "content_hash": content,
+                }
+                for bar, digest, content in batch
+                if content not in stored
+            ]
+            if not pending:
+                continue
+            # Bounded recordsets preserve the append-only revision checks without
+            # three network round trips per candle on a throttled database.
+            params = {"id": identifier, "rows": canonical(pending)}
             connection.execute(
                 text("""
                 INSERT INTO closed_bar_observations
-                  (instrument_id,timeframe,open_at,close_at,source_at,observed_at,payload,input_hash)
-                SELECT :id,timeframe,open_at,close_at,source_at,observed_at,payload,input_hash
+                  (instrument_id,timeframe,open_at,close_at,source_at,observed_at,
+                   payload,input_hash,content_hash)
+                SELECT :id,timeframe,open_at,close_at,source_at,observed_at,
+                       payload,input_hash,content_hash
                 FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
                   timeframe text,open_at timestamptz,close_at timestamptz,
-                  source_at timestamptz,observed_at timestamptz,payload text,input_hash text)
+                  source_at timestamptz,observed_at timestamptz,payload text,
+                  input_hash text,content_hash text)
                 ON CONFLICT DO NOTHING
             """),
                 params,
             )
-            confirmed = set(connection.scalars(STORED_OBSERVATIONS, params))
-            if confirmed != {row["input_hash"] for row in batch}:
+            confirmed = set(connection.scalars(STORED_CONTENT, params))
+            if confirmed != {row["content_hash"] for row in pending}:
                 raise ValueError("CONFLICTING_PERSISTED_BAR_REVISION")
             connection.execute(
                 text("""
@@ -95,26 +92,14 @@ def save_view(db: Database, view: BarView, *, persist_features: bool = True) -> 
                   observed_at timestamptz,open numeric,high numeric,low numeric,
                   close numeric,volume numeric)
                 ORDER BY open_at,observed_at
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (instrument_id,timeframe,open_at) DO UPDATE SET
+                  close_at=EXCLUDED.close_at,observed_at=EXCLUDED.observed_at,
+                  open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,
+                  close=EXCLUDED.close,volume=EXCLUDED.volume,complete=EXCLUDED.complete
+                WHERE EXCLUDED.observed_at > closed_bars.observed_at
             """),
                 params,
             )
-        if not persist_features:
-            return
-        connection.execute(
-            text("""
-            INSERT INTO feature_snapshots (snapshot_id,instrument_id,feature_hash,as_of,payload)
-            VALUES (:snapshot,:id,:hash,:as_of,CAST(:payload AS jsonb))
-            ON CONFLICT DO NOTHING
-        """),
-            {
-                "snapshot": uuid5(NAMESPACE_URL, view.digest),
-                "id": identifier,
-                "hash": view.digest,
-                "as_of": view.as_of,
-                "payload": canonical(view.payload),
-            },
-        )
 
 
 def load_bars(

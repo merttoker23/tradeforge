@@ -21,7 +21,7 @@ def test_history_batch_has_bounded_round_trips_and_preserves_every_revision(migr
 
     event.listen(migrated.sql_engine, "before_cursor_execute", capture)
     try:
-        save_view(migrated, view, persist_features=False)
+        save_view(migrated, view)
     finally:
         event.remove(migrated.sql_engine, "before_cursor_execute", capture)
     assert len(statements) <= 5
@@ -36,10 +36,12 @@ def test_replay_lookup_does_not_scan_retained_instrument_history(migrated):
         c.execute(
             text("""
             INSERT INTO closed_bar_observations
-              (instrument_id,timeframe,open_at,close_at,source_at,observed_at,payload,input_hash)
+              (instrument_id,timeframe,open_at,close_at,source_at,observed_at,
+               payload,input_hash,content_hash)
             SELECT :id,'15m',at,at+interval '899 seconds',at+interval '899 seconds',
                    at+interval '900 seconds'+revision*interval '1 second',
-                   payload,encode(sha256(convert_to(payload,'UTF8')),'hex')
+                   payload,encode(sha256(convert_to(payload,'UTF8')),'hex'),
+                   encode(sha256(convert_to(payload,'UTF8')),'hex')
             FROM (
               SELECT timestamptz '2026-10-01' + (n/4)*interval '15 minutes' AS at,n%4 AS revision,
                      '{"retained":'||n||'}' AS payload FROM generate_series(1,12000) n
@@ -60,7 +62,7 @@ def test_replay_lookup_does_not_scan_retained_instrument_history(migrated):
 
     event.listen(migrated.sql_engine, "before_cursor_execute", capture)
     try:
-        save_view(migrated, view, persist_features=False)
+        save_view(migrated, view)
     finally:
         event.remove(migrated.sql_engine, "before_cursor_execute", capture)
     assert len(lookups) == 2
@@ -91,8 +93,8 @@ def test_history_larger_than_recordset_chunk_is_atomic_and_replayable(migrated):
     for index in range(513):
         state.ingest_bar(bar(index))
     view = state.view(instrument(), Timeframe.M15, bar(512).as_of)
-    save_view(migrated, view, persist_features=False)
-    save_view(migrated, view, persist_features=False)
+    save_view(migrated, view)
+    save_view(migrated, view)
     with migrated.transaction() as c:
         assert c.scalar(text("SELECT count(*) FROM closed_bar_observations")) == 513
         assert c.scalar(text("SELECT count(*) FROM closed_bars")) == 513

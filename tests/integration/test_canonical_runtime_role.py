@@ -35,7 +35,7 @@ def test_canonical_cycle_persists_as_market_without_feature_write_authority(migr
     gateway = SimpleNamespace(canonical=feed, clock=lambda: sample.as_of)
     try:
         asyncio.run(runtime.canonical_cycle(gateway, market, None, require_admission=False))
-        assert feed.storage_ready
+        assert feed.storage_ready, feed.storage_error
         with migrated.transaction() as c:
             assert c.scalar(text("SELECT count(*) FROM closed_bar_observations")) == 1
             assert c.scalar(text("SELECT count(*) FROM feature_snapshots")) == 0

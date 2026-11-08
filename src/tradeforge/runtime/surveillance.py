@@ -49,6 +49,17 @@ class RuntimeSurveillance:
                 .scalars()
                 .all()
             )
+            guardian = c.execute(
+                text("SELECT payload FROM runtime_observations WHERE service='execution_guardian'")
+            ).first()
+        resource_pressure = 0.0
+        if guardian is not None:
+            try:
+                resource_pressure = min(
+                    1.0, max(0.0, float(guardian.payload.get("resource_pressure", 0.0)))
+                )
+            except (TypeError, ValueError):
+                resource_pressure = 0.0
         positions = tuple(
             InstrumentKey(
                 symbol=s,
@@ -69,7 +80,10 @@ class RuntimeSurveillance:
             features,
             now=at,
             positions=positions,
-            queue_pressure=float(len(self.gateway.queue) / self.gateway.queue.capacity),
+            queue_pressure=max(
+                float(len(self.gateway.queue) / self.gateway.queue.capacity),
+                resource_pressure,
+            ),
         )
         self.watch = tuple(k.symbol for k in allocation.universe.watched)
         self.deep = tuple(k.symbol for k in allocation.universe.deep)

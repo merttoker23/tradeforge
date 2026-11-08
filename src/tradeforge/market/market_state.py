@@ -41,11 +41,16 @@ class BarView:
 
 
 class MarketState:
-    def __init__(self, capacity: int = 2048, *, max_series: int = 4096) -> None:
+    def __init__(
+        self, capacity: int = 2048, *, max_series: int = 4096, max_failures: int = 16
+    ) -> None:
         BarWindow(capacity)
         if type(max_series) is not int or not 1 <= max_series <= 100_000:
             raise ValueError("INVALID_SERIES_BUDGET")
+        if type(max_failures) is not int or not 1 <= max_failures <= 1024:
+            raise ValueError("INVALID_FAILURE_BUDGET")
         self.capacity, self.max_series = capacity, max_series
+        self.max_failures = max_failures
         self._series: dict[tuple[str, ...], BarWindow] = {}
         self._failures: dict[tuple[str, ...], list[tuple[datetime, DataQuality]]] = {}
 
@@ -69,8 +74,8 @@ class MarketState:
         history = self._failures.setdefault(identity, [])
         history.append((utc(at or datetime.now(UTC)), quality))
         history.sort(key=lambda pair: pair[0])
-        if len(history) > self.capacity:
-            del history[: -self.capacity]
+        if len(history) > self.max_failures:
+            del history[: -self.max_failures]
 
     def ingest_bar(self, bar: ClosedBar) -> bool:
         if bar.key not in self._series:
