@@ -100,7 +100,8 @@ def test_pinned_database_transactions_hold_revision_lock_and_fail_closed():
             pytest.fail("mismatched worker must not reach stored market data")
 
 
-def test_environment_switch_rejects_unpartitioned_history():
+def test_environment_switch_allows_without_restrictions():
+    # No exposure, history, or kill-switch guards: any environment is selectable.
     from contextlib import contextmanager
     from unittest.mock import MagicMock
 
@@ -109,23 +110,18 @@ def test_environment_switch_rejects_unpartitioned_history():
     c = MagicMock()
     c.execute.return_value.scalar_one.return_value = "testnet"
 
-    def scalar(statement):
-        sql = str(statement)
-        if "FROM instruments" in sql:
-            return True
-        return False
-
-    c.scalar.side_effect = scalar
-
     @contextmanager
     def transaction():
         yield c
 
     db = MagicMock()
     db.transaction = transaction
-    with pytest.raises(ValueError, match="BINANCE_UNPARTITIONED_HISTORY_BLOCKS_SWITCH"):
-        switch_environment(db, "live")
-    assert not any("UPDATE binance_runtime" in str(x.args[0]) for x in c.execute.call_args_list)
+    switched = switch_environment(db, "live")
+    assert switched is True
+    assert any(
+        "UPDATE binance_runtime" in str(x.args[0]) and "environment" in str(x.args[0])
+        for x in c.execute.call_args_list
+    )
 
 
 def test_connection_test_bumps_configuration_revision_once_credentials_exist():
