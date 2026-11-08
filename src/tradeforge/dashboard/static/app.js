@@ -72,7 +72,6 @@ function render(data) {
       "Akış durumu":marketState.clock_safe===true&&market?.freshness==="OK"?"Saat ve worker güncel":"Doğrulanamadı"};
     Object.entries(rows).forEach(([name,state])=>{const r=node("div","","health-row");r.append(node("span",name),node("span",String(state)));$("binance-health").append(r);});
   }
-  $("source-details").textContent=JSON.stringify({status:data.status,market_environment:data.market_environment,trading_authority:data.trading_authority,streams:sections.streams,regime:sections.regime,workers:sections.workers,guardian:sections.guardian,risk:sections.risk},null,2);
   $("sample-time").textContent="Kaynak: "+value(data.as_of);
 }
 function renderDecision(){

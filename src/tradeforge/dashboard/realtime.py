@@ -112,17 +112,24 @@ class RealtimeHub:
             headers = request.headers.getall("Authorization", [])
             return self.auth.authenticate(headers[0] if len(headers) == 1 else None, "read")
         else:
-            raise AuthError(401)
+            # Local operator listener (apps/dashboard/runtime.py without a
+            # separate auth file): the containing middleware binds the peer
+            # and Host to loopback, mirroring dashboard.api.principal(). The
+            # same-origin check keeps cross-site upgrades rejected even when
+            # this hub is installed standalone.
+            if request.headers.get("Origin") not in (None, f"http://{request.host}"):
+                raise AuthError(403)
+            return Principal("loopback", frozenset({"read", "control"}))
 
     async def asset(self, request: web.Request) -> web.Response:
         # A regular script fetch does not carry an Origin header.
         if self.sessions is not None:
             self.sessions.authenticate(request.cookies.get(COOKIE), "read")
-        elif not self.read_only_loopback:
-            if self.auth is None:
-                raise AuthError(401)
+        elif not self.read_only_loopback and self.auth is not None:
             headers = request.headers.getall("Authorization", [])
             self.auth.authenticate(headers[0] if len(headers) == 1 else None, "read")
+        # Loopback with no auth file and read-only mode serve the public static
+        # asset; the containing middleware still constrains peer and Host.
         return web.Response(
             body=(STATIC / "realtime.js").read_bytes(),
             content_type="text/javascript",

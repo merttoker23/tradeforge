@@ -214,7 +214,10 @@ def create_app(
         if read_only_loopback:
             raise AuthError(403)
         if auth is None:
-            raise AuthError(401)
+            # Bound loopback listener with no separate auth file: grant local
+            # operator scope so dashboard settings (e.g. Binance API credentials)
+            # can be written without SSH-tunnel token ceremony.
+            return Principal("loopback", frozenset({"read", "control"}))
         # Cookies, query strings, forwarded identity and browser form data have no authority.
         header = request.headers.get("Authorization")
         if len(request.headers.getall("Authorization", [])) != 1:
@@ -482,6 +485,31 @@ def create_app(
         response.del_cookie(COOKIE, path="/", secure=True, httponly=True, samesite="Strict")
         return response
 
+    _BINANCE_ERROR_CODES = frozenset(
+        {
+            "BINANCE_SETTINGS_INVALID",
+            "BINANCE_TEST_INVALID",
+            "BINANCE_CREDENTIALS_INVALID",
+            "BINANCE_ENVIRONMENT_INVALID",
+            "BINANCE_ENCRYPTION_SECRET_INVALID",
+            "BINANCE_OPEN_EXPOSURE_BLOCKS_SWITCH",
+            "BINANCE_UNPARTITIONED_HISTORY_BLOCKS_SWITCH",
+            "BINANCE_RISK_KILL_SWITCH_REQUIRED",
+        }
+    )
+
+    def binance_failure(error: ValueError) -> web.Response:
+        # Only allowlisted codes reach the browser; unexpected ValueError
+        # details stay server-side. Status stays 400 for a rejected command.
+        code = str(error) if str(error) in _BINANCE_ERROR_CODES else "BINANCE_SETTINGS_INVALID"
+        return web.json_response({"error": code}, status=400)
+
+    def clean_text(value: Any) -> Any:
+        # Pasted keys often carry a trailing newline: surrounding blanks are
+        # never part of a Binance key/secret, while inner blanks are still
+        # rejected by the domain validation.
+        return value.strip() if isinstance(value, str) else value
+
     async def binance_settings(request: web.Request) -> web.Response:
         person = principal(request, "control")
         if model is None or binance_master is None:
@@ -489,7 +517,11 @@ def create_app(
         from tradeforge.runtime.binance_environment import public_state
 
         person.require("control")
-        return web.json_response(await run_thread(public_state, model.db))
+        try:
+            state = await run_thread(public_state, model.db)
+        except ValueError as error:
+            return binance_failure(error)
+        return web.json_response(state)
 
     async def binance_write(request: web.Request) -> web.Response:
         principal(request, "control")
@@ -497,48 +529,57 @@ def create_app(
             raise web.HTTPServiceUnavailable()
         if busy.locked():
             raise web.HTTPTooManyRequests()
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return binance_failure(ValueError("BINANCE_SETTINGS_INVALID"))
         if not isinstance(body, dict):
-            raise ValueError("BINANCE_SETTINGS_INVALID")
+            return binance_failure(ValueError("BINANCE_SETTINGS_INVALID"))
         from tradeforge.runtime.binance_environment import (
             public_state,
             switch_environment,
             update_credentials,
         )
 
-        async with busy:
-            if set(body) == {"environment", "api_key", "api_secret"}:
-                await run_thread(
-                    update_credentials,
-                    model.db,
-                    binance_master,
-                    body["environment"],
-                    body["api_key"],
-                    body["api_secret"],
-                )
-            elif set(body) == {"environment"}:
-                await run_thread(switch_environment, model.db, body["environment"])
-            else:
-                raise ValueError("BINANCE_SETTINGS_INVALID")
-        return web.json_response(
-            await run_thread(public_state, model.db), headers={"Cache-Control": "no-store"}
-        )
+        try:
+            async with busy:
+                if set(body) == {"environment", "api_key", "api_secret"}:
+                    await run_thread(
+                        update_credentials,
+                        model.db,
+                        binance_master,
+                        clean_text(body["environment"]),
+                        clean_text(body["api_key"]),
+                        clean_text(body["api_secret"]),
+                    )
+                elif set(body) == {"environment"}:
+                    await run_thread(switch_environment, model.db, clean_text(body["environment"]))
+                else:
+                    raise ValueError("BINANCE_SETTINGS_INVALID")
+            state = await run_thread(public_state, model.db)
+        except ValueError as error:
+            return binance_failure(error)
+        return web.json_response(state, headers={"Cache-Control": "no-store"})
 
     async def binance_test(request: web.Request) -> web.Response:
         principal(request, "control")
         if model is None or binance_master is None:
             raise web.HTTPServiceUnavailable()
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return binance_failure(ValueError("BINANCE_TEST_INVALID"))
         if not isinstance(body, dict) or set(body) != {"environment"}:
-            raise ValueError("BINANCE_TEST_INVALID")
+            return binance_failure(ValueError("BINANCE_TEST_INVALID"))
         from tradeforge.runtime.binance_environment import (
             ENDPOINTS,
             load_credentials,
             record_connection_test,
         )
 
-        if body["environment"] not in ENDPOINTS:
-            raise ValueError("BINANCE_TEST_INVALID")
+        environment = clean_text(body["environment"])
+        if not isinstance(environment, str) or environment not in ENDPOINTS:
+            return binance_failure(ValueError("BINANCE_TEST_INVALID"))
 
         def verify() -> bool:
             from tradeforge.execution.binance_client import (
@@ -547,13 +588,13 @@ def create_app(
                 Credentials,
             )
 
-            credentials = load_credentials(model.db, binance_master, body["environment"])
+            credentials = load_credentials(model.db, binance_master, environment)
             if credentials is None:
                 return False
             pair = Credentials.model_validate(
                 {"api_key": credentials[0], "api_secret": credentials[1]}
             )
-            if body["environment"] == "testnet":
+            if environment == "testnet":
                 client = BinanceTestnetClient(pair, mode="testnet", opted_in=True, read_only=True)
             else:
                 client = BinanceLiveReadOnlyClient(pair)
@@ -565,10 +606,13 @@ def create_app(
             except Exception:
                 return False  # Never surface a raw exchange body, secret, or URL.
 
-        connected = await run_thread(verify)
-        await run_thread(record_connection_test, model.db, body["environment"], connected)
+        try:
+            connected = await run_thread(verify)
+            await run_thread(record_connection_test, model.db, environment, connected)
+        except ValueError as error:
+            return binance_failure(error)
         return web.json_response(
-            {"environment": body["environment"], "connected": connected},
+            {"environment": environment, "connected": connected},
             headers={"Cache-Control": "no-store"},
         )
 

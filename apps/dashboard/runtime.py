@@ -56,6 +56,7 @@ def build_app(
     database_file: Path | None = None,
     auth_file: Path | None = None,
     read_only_loopback: bool = False,
+    binance_master: str | None = None,
 ) -> web.Application:
     db = None
     try:
@@ -72,6 +73,7 @@ def build_app(
             auth,
             read_only_loopback=read_only_loopback,
             chart_demand=notify_chart_demand if read_only_loopback else None,
+            binance_master=binance_master,
         )
         if db is not None:
 
@@ -95,6 +97,11 @@ def main() -> int:
     parser.add_argument("--provision-auth", action="store_true")
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--read-only-loopback", action="store_true")
+    parser.add_argument(
+        "--binance-master",
+        type=str,
+        help="Binance API kimlik şifreleme anahtarı (en az 32 karakter)",
+    )
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
@@ -120,6 +127,7 @@ def main() -> int:
             database_file=args.database_file,
             auth_file=args.auth_file,
             read_only_loopback=args.read_only_loopback,
+            binance_master=args.binance_master,
         )
         web.run_app(app, host="127.0.0.1", port=args.port, access_log=None, print=None)
     except (ValueError, OSError):
