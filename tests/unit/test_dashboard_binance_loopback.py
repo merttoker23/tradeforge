@@ -139,6 +139,61 @@ def test_binance_write_trims_and_returns_specific_error_codes(monkeypatch):
     asyncio.run(run())
 
 
+def test_binance_test_reports_a_safe_specific_rejection_reason(monkeypatch):
+    from tradeforge.execution import binance_client
+    from tradeforge.execution.broker import ExchangeRejected
+    from tradeforge.runtime import binance_environment
+
+    recorded = {}
+    monkeypatch.setattr(
+        binance_environment,
+        "load_credentials",
+        lambda db, master, env: ("a" * 32, "b" * 32),
+    )
+    monkeypatch.setattr(
+        binance_environment,
+        "record_connection_test",
+        lambda db, env, connected: recorded.update(environment=env, connected=connected),
+    )
+
+    class RejectedClient:
+        environment = "testnet"
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, method, path, params=None, *, signed=True):
+            if path == "/fapi/v1/ping":
+                return {}
+            raise ExchangeRejected("API_KEY_INVALID")
+
+    monkeypatch.setattr(binance_client, "BinanceTestnetClient", RejectedClient)
+
+    async def run():
+        app = create_app(
+            Model(), None, auth=None, read_only_loopback=False, binance_master="x" * 32
+        )
+        runner, root = await serve(app)
+        try:
+            async with ClientSession() as client:
+                async with client.post(
+                    root + "/api/binance/test",
+                    json={"environment": "testnet"},
+                    headers={"Origin": root},
+                ) as response:
+                    assert response.status == 200
+                    assert (await response.json()) == {
+                        "environment": "testnet",
+                        "connected": False,
+                        "reason": "BINANCE_TEST_API_KEY_INVALID",
+                    }
+                assert recorded == {"environment": "testnet", "connected": False}
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
 def test_binance_test_with_no_credentials_reports_disconnected(monkeypatch):
     from tradeforge.runtime import binance_environment
 
@@ -163,7 +218,11 @@ def test_binance_test_with_no_credentials_reports_disconnected(monkeypatch):
                     headers={"Origin": root},
                 ) as response:
                     assert response.status == 200
-                    assert (await response.json()) == {"environment": "testnet", "connected": False}
+                    assert (await response.json()) == {
+                        "environment": "testnet",
+                        "connected": False,
+                        "reason": "BINANCE_TEST_CREDENTIALS_MISSING",
+                    }
                 assert recorded == {"environment": "testnet", "connected": False}
         finally:
             await runner.cleanup()

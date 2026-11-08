@@ -126,3 +126,79 @@ def test_environment_switch_rejects_unpartitioned_history():
     with pytest.raises(ValueError, match="BINANCE_UNPARTITIONED_HISTORY_BLOCKS_SWITCH"):
         switch_environment(db, "live")
     assert not any("UPDATE binance_runtime" in str(x.args[0]) for x in c.execute.call_args_list)
+
+
+def test_connection_test_bumps_configuration_revision_once_credentials_exist():
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from tradeforge.runtime.binance_environment import record_connection_test
+
+    c = MagicMock()
+    c.execute.return_value.rowcount = 1
+
+    @contextmanager
+    def transaction():
+        yield c
+
+    db = MagicMock()
+    db.transaction = transaction
+    record_connection_test(db, "testnet", True)
+    statements = [str(x.args[0]) for x in c.execute.call_args_list]
+    assert any("UPDATE binance_credentials" in statement for statement in statements)
+    assert any(
+        "UPDATE binance_runtime" in statement and "revision=revision+1" in statement
+        for statement in statements
+    )
+
+
+def test_connection_test_without_saved_credentials_leaves_revision_alone():
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from tradeforge.runtime.binance_environment import record_connection_test
+
+    c = MagicMock()
+    c.execute.return_value.rowcount = 0
+
+    @contextmanager
+    def transaction():
+        yield c
+
+    db = MagicMock()
+    db.transaction = transaction
+    record_connection_test(db, "live", False)
+    assert not any("UPDATE binance_runtime" in str(x.args[0]) for x in c.execute.call_args_list)
+
+
+def test_environment_switch_to_testnet_allowed_with_history():
+    # Testnet carries no real money: retargeting to it must not be blocked by
+    # unpartitioned history, while the exposure and kill-switch guards still apply.
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from tradeforge.runtime.binance_environment import switch_environment
+
+    c = MagicMock()
+    c.execute.return_value.scalar_one.return_value = "live"
+
+    def scalar(statement):
+        sql = str(statement)
+        if "FROM instruments" in sql:
+            return True
+        return False
+
+    c.scalar.side_effect = scalar
+
+    @contextmanager
+    def transaction():
+        yield c
+
+    db = MagicMock()
+    db.transaction = transaction
+    switched = switch_environment(db, "testnet")
+    assert switched is True
+    assert any(
+        "UPDATE binance_runtime" in str(x.args[0]) and "environment" in str(x.args[0])
+        for x in c.execute.call_args_list
+    )

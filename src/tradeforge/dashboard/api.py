@@ -581,38 +581,59 @@ def create_app(
         if not isinstance(environment, str) or environment not in ENDPOINTS:
             return binance_failure(ValueError("BINANCE_TEST_INVALID"))
 
-        def verify() -> bool:
+        # Only fixed, credential-free codes are reported so the operator learns
+        # whether to fix the key, the permissions, the clock or the network.
+        rejection_reasons = {
+            "API_KEY_INVALID": "BINANCE_TEST_API_KEY_INVALID",
+            "API_KEY_PERMISSION_OR_IP_DENIED": "BINANCE_TEST_PERMISSION_DENIED",
+            "SIGNATURE_INVALID": "BINANCE_TEST_SIGNATURE_INVALID",
+            "CLOCK_UNSAFE": "BINANCE_TEST_CLOCK_UNSAFE",
+            "RATE_LIMITED": "BINANCE_TEST_RATE_LIMITED",
+        }
+
+        def verify() -> tuple[bool, str | None]:
             from tradeforge.execution.binance_client import (
                 BinanceLiveReadOnlyClient,
                 BinanceTestnetClient,
                 Credentials,
             )
+            from tradeforge.execution.broker import AckUnknown, ExchangeRejected
 
             credentials = load_credentials(model.db, binance_master, environment)
             if credentials is None:
-                return False
-            pair = Credentials.model_validate(
-                {"api_key": credentials[0], "api_secret": credentials[1]}
-            )
-            if environment == "testnet":
-                client = BinanceTestnetClient(pair, mode="testnet", opted_in=True, read_only=True)
-            else:
-                client = BinanceLiveReadOnlyClient(pair)
+                return False, "BINANCE_TEST_CREDENTIALS_MISSING"
             try:
+                pair = Credentials.model_validate(
+                    {"api_key": credentials[0], "api_secret": credentials[1]}
+                )
+                if environment == "testnet":
+                    client = BinanceTestnetClient(
+                        pair, mode="testnet", opted_in=True, read_only=True
+                    )
+                else:
+                    client = BinanceLiveReadOnlyClient(pair)
                 client.request("GET", "/fapi/v1/ping", signed=False)
                 balance = client.request("GET", "/fapi/v3/balance")
                 positions = client.request("GET", "/fapi/v3/positionRisk")
-                return isinstance(balance, list) and isinstance(positions, list)
+            except ExchangeRejected as error:
+                return False, rejection_reasons.get(str(error), "BINANCE_TEST_REJECTED")
+            except AckUnknown:
+                return False, "BINANCE_TEST_NETWORK_UNAVAILABLE"
+            except ValueError:
+                return False, "BINANCE_TEST_CREDENTIALS_INVALID"
             except Exception:
-                return False  # Never surface a raw exchange body, secret, or URL.
+                return False, "BINANCE_TEST_FAILED"  # Never surface wire data or secrets.
+            if not isinstance(balance, list) or not isinstance(positions, list):
+                return False, "BINANCE_TEST_RESPONSE_INVALID"
+            return True, None
 
         try:
-            connected = await run_thread(verify)
+            connected, reason = await run_thread(verify)
             await run_thread(record_connection_test, model.db, environment, connected)
         except ValueError as error:
             return binance_failure(error)
         return web.json_response(
-            {"environment": environment, "connected": connected},
+            {"environment": environment, "connected": connected, "reason": reason},
             headers={"Cache-Control": "no-store"},
         )
 

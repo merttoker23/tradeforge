@@ -26,17 +26,19 @@
 <div class="heading"><div><span class="eyebrow">SİSTEM SAĞLIĞI / YETKİLİ AYARLAR</span><h1>Binance API Ayarları<span>.</span></h1><p class="subtitle">USDⓈ-M Futures • Testnet ve Production kimlik bilgileri birbirinden ayrıdır.</p></div></div>
 <div class="panel binance-settings"><div class="panel-head"><h2>Aktif veri ortamı</h2></div>
 <div class="binance-group"><div class="health-row"><span>Aktif</span><strong id="binance-current">—</strong></div>
-<div class="health-row"><span>Yapılandırma revizyonu</span><strong id="binance-revision">—</strong></div>
 <label for="binance-environment">Çalışma ortamı</label><select id="binance-environment"><option value="testnet">Testnet / Demo</option><option value="live">Live / Production (yalnızca veri ve read-only hesap testi)</option></select>
+<p id="binance-environment-note" class="source-note" role="status"></p>
 <button id="binance-activate" type="button">Ortamı etkinleştir</button></div></div>
 <div class="binance-key-grid">
 <article class="panel binance-settings"><div class="panel-head"><h2>Testnet API</h2></div><div class="binance-group"><p id="binance-testnet-status" class="muted">Henüz doğrulanmadı</p>
 <label for="binance-testnet-key">API Key</label><input id="binance-testnet-key" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Yeni anahtarı girin">
 <label for="binance-testnet-secret">API Secret</label><input id="binance-testnet-secret" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Yeni secret girin">
+<p id="binance-testnet-entry" class="source-note" role="status"></p>
 <div class="binance-buttons"><button id="binance-testnet-save" type="button">Kaydet</button><button id="binance-testnet-test" type="button">REST bağlantı testi</button></div></div></article>
 <article class="panel binance-settings"><div class="panel-head"><h2>Live API</h2></div><div class="binance-group"><p id="binance-live-status" class="muted">Henüz doğrulanmadı</p>
 <label for="binance-live-key">API Key</label><input id="binance-live-key" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Yeni anahtarı girin">
 <label for="binance-live-secret">API Secret</label><input id="binance-live-secret" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Yeni secret girin">
+<p id="binance-live-entry" class="source-note" role="status"></p>
 <div class="binance-buttons"><button id="binance-live-save" type="button">Kaydet</button><button id="binance-live-test" type="button">REST bağlantı testi</button></div></div></article></div>
 <p class="source-note" id="binance-feedback" role="status">Yönetici oturumu gerekli. API anahtarları tekrar görüntülenmez.</p>
 </section>

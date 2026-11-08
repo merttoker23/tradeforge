@@ -163,34 +163,38 @@ def switch_environment(db: Database, environment: str) -> bool:
             raise ValueError("BINANCE_OPEN_EXPOSURE_BLOCKS_SWITCH")
         # This repository has non-namespaced, append-only market and trade tables.
         # Refuse cross-environment reuse rather than silently applying old evidence
-        # to the new feed. This is intentionally restrictive until state partitioning
-        # is migrated and proven in a live Postgres integration environment.
-        history_tables = (
-            "instruments",
-            "universe_snapshots",
-            "closed_bars",
-            "closed_bar_observations",
-            "feature_snapshots",
-            "regime_snapshots",
-            "opportunities",
-            "runtime_market",
-            "terminal_chart_cache",
-            "runtime_observations",
-            "decisions",
-            "decision_reasons",
-            "execution_intents",
-            "orders",
-            "fills",
-            "positions",
-            "protective_orders",
-            "account_snapshots",
-            "audit_log",
-            "decision_lifecycle",
-            "risk_snapshots",
-        )
-        for table in history_tables:
-            if c.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {table})")):
-                raise ValueError("BINANCE_UNPARTITIONED_HISTORY_BLOCKS_SWITCH")
+        # to the new feed. Switching into production (live) with unpartitioned
+        # history is always blocked; retargeting testnet (demo money) is allowed
+        # so operators can validate against the exchange without real funds. This
+        # is intentionally restrictive until state partitioning is migrated and
+        # proven in a live Postgres integration environment.
+        if environment == "live":
+            history_tables = (
+                "instruments",
+                "universe_snapshots",
+                "closed_bars",
+                "closed_bar_observations",
+                "feature_snapshots",
+                "regime_snapshots",
+                "opportunities",
+                "runtime_market",
+                "terminal_chart_cache",
+                "runtime_observations",
+                "decisions",
+                "decision_reasons",
+                "execution_intents",
+                "orders",
+                "fills",
+                "positions",
+                "protective_orders",
+                "account_snapshots",
+                "audit_log",
+                "decision_lifecycle",
+                "risk_snapshots",
+            )
+            for table in history_tables:
+                if c.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {table})")):
+                    raise ValueError("BINANCE_UNPARTITIONED_HISTORY_BLOCKS_SWITCH")
         # Operator must first engage the existing risk kill switch.
         if c.scalar(text("SELECT EXISTS(SELECT 1 FROM risk_state WHERE kill_switch=false)")):
             raise ValueError("BINANCE_RISK_KILL_SWITCH_REQUIRED")
@@ -208,10 +212,19 @@ def record_connection_test(db: Database, environment: str, connected: bool) -> N
     if not isinstance(environment, str) or environment not in ENDPOINTS:
         raise ValueError("BINANCE_ENVIRONMENT_INVALID")
     with db.transaction() as c:
-        c.execute(
+        updated = c.execute(
             text(
                 "UPDATE binance_credentials SET last_test_at=clock_timestamp(), "
                 "last_test_ok=:connected WHERE environment=:environment"
             ),
             {"environment": environment, "connected": connected},
         )
+        # A recorded test is a configuration event: keep the revision display in
+        # step with what the operator just observed on the settings screen.
+        if updated.rowcount:
+            c.execute(
+                text(
+                    "UPDATE binance_runtime SET revision=revision+1, "
+                    "changed_at=clock_timestamp() WHERE id=1"
+                )
+            )
