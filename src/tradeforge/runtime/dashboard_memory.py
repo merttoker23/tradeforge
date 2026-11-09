@@ -1,4 +1,7 @@
-"""Display public quotes from RAM; closed chart demand remains bounded and internal."""
+"""Display public quotes from RAM; closed chart demand remains bounded and internal.
+
+Testnet-only demo account reads and manual orders are separate from Guardian.
+"""
 
 import asyncio
 import json
@@ -11,6 +14,8 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from tradeforge.dashboard.api import create_app
 from tradeforge.dashboard.control import CommandQueue
+from tradeforge.dashboard.demo_operator import attach_demo_operator
+from tradeforge.dashboard.local_terminal import TerminalReadModel
 from tradeforge.dashboard.read_model import ReadModel
 from tradeforge.dashboard.sessions import Sessions
 from tradeforge.domain.market import MarketQuote
@@ -118,8 +123,6 @@ def dashboard_app(
                     cache.consume(data)
                 except Exception:
                     cache.unavailable()
-                # This is an internal RAM handoff, not an exchange/DB poll. Keep
-                # source-to-display delay short while never overlapping handoffs.
                 await asyncio.sleep(max(0.1, 0.25 - (time.monotonic() - started)))
 
         async with ClientSession(trust_env=False) as session:
@@ -132,6 +135,9 @@ def dashboard_app(
                 await asyncio.gather(task, return_exceptions=True)
                 connection = None
 
+    # Retain the previous closed-candle cache freshness fix on VPS/Docker.
+    if model is not None:
+        model = TerminalReadModel(model.db, clock=model.clock)
     app = create_app(
         model,
         queue,
@@ -142,5 +148,15 @@ def dashboard_app(
         chart_demand=chart,
         binance_master=binance_master,
     )
+    # This serves authenticated, operator-initiated Testnet orders. It never
+    # issues autonomous orders and has no production mutation host.
+    if model is not None:
+        attach_demo_operator(
+            app,
+            model.db,
+            binance_master,
+            sessions=sessions,
+            external_origin=external_origin,
+        )
     app.cleanup_ctx.append(context)
     return app

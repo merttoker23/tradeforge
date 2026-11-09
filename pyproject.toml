@@ -38,6 +38,10 @@ pythonpath = ["src", "."]
 addopts = "-ra --strict-markers --strict-config"
 cache_dir = ".cache/pytest"
 
+markers = [
+    "asyncio: mark the test as an asyncio test",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

@@ -49,7 +49,15 @@ class UniverseRefresher:
             # Stale metadata must be refreshed immediately; failures use bounded polling.
             if previous.reason != "UNIVERSE_STALE":
                 return previous
-        etag = observation.etag if observation and observation.reason is None else None
+        # Stored metadata may belong to the previous Binance environment. The
+        # first fetch in each newly started worker must not send that environment's
+        # ETag; a cross-environment HTTP 304 would otherwise admit its old universe.
+        # Only this worker's own successfully refreshed metadata can be conditional.
+        etag = (
+            observation.etag
+            if self.next_refresh is not None and observation and observation.reason is None
+            else None
+        )
         reason = None
         try:
             reply = self.client.fetch(etag)

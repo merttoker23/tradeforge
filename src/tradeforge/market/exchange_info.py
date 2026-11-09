@@ -78,6 +78,7 @@ def parse_exchange_info(payload: object, observed_at: datetime) -> ParsedUnivers
     if type(budget) is not int or budget <= 0:
         raise ValueError("INVALID_RATE_LIMIT")
     instruments, excluded, seen = [], [], set()
+    unusable_filters = 0
     for row in rows:
         required = ("symbol", "status", "contractType", "quoteAsset", "marginAsset")
         if not isinstance(row, dict) or any(
@@ -120,9 +121,20 @@ def parse_exchange_info(payload: object, observed_at: datetime) -> ParsedUnivers
         try:
             filters, market_lot, constraints = normalize_filters(row.get("filters"))
         except ValueError as error:
-            if str(error) != "UNSUPPORTED_POSITION_CONTROL":
+            reason = str(error)
+            # Testnet can publish individual TRADING instruments with zero
+            # order capacity or unusable numeric constraints. Never admit these
+            # instruments, but do not let them block valid independent symbols.
+            # Unknown/structural constraints still halt the entire refresh.
+            if reason not in {
+                "UNSUPPORTED_POSITION_CONTROL",
+                "INVALID_ORDER_LIMIT",
+                "UNSUPPORTED_FILTER_VALUE",
+            }:
                 raise
-            excluded.append(Exclusion(symbol=name, reason="UNSUPPORTED_POSITION_CONTROL"))
+            excluded.append(Exclusion(symbol=name, reason=reason))
+            if reason != "UNSUPPORTED_POSITION_CONTROL":
+                unusable_filters += 1
             continue
         identifier = uuid5(NAMESPACE_URL, f"{name}/{observed_at.isoformat()}/{constraints}")
         instruments.append(
@@ -149,6 +161,10 @@ def parse_exchange_info(payload: object, observed_at: datetime) -> ParsedUnivers
                 context={"now": observed_at},
             )
         )
+    # A response consisting only of broken constraints must not be advertised
+    # as a healthy empty market. Preserve the original all-ineligible behavior.
+    if unusable_filters and not instruments:
+        raise ValueError("UNUSABLE_UNIVERSE_FILTERS")
     return ParsedUniverse(
         instruments=tuple(sorted(instruments, key=lambda i: i.symbol)),
         excluded=tuple(sorted(excluded, key=lambda i: i.symbol)),

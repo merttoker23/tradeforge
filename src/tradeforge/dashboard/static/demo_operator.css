@@ -1,0 +1,19 @@
+/* Testnet-only manual order panel. Loaded from same origin under strict CSP. */
+#demo-manual-order { margin-top: 18px; }
+#demo-manual-form {display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;align-items:end;}
+#demo-manual-form label {display:flex;flex-direction:column;gap:6px;color:#9eafc7;font-size:12px;}
+#demo-manual-form label:has(input[type="checkbox"]) {flex-direction:row;align-items:center;}
+#demo-manual-form input:not([type="checkbox"]),
+#demo-manual-form select,
+#demo-manual-check input {
+  box-sizing:border-box;border:1px solid #2c3c50;border-radius:6px;
+  background:#111a25;color:#eaf1fa;padding:10px 12px;min-width:0;
+}
+#demo-manual-form button,#demo-manual-check button {
+  padding:10px 15px;border:1px solid #225c53;border-radius:6px;
+  color:#cdf6eb;background:#163e38;cursor:pointer;
+}
+#demo-manual-form button:disabled {opacity:.55;cursor:wait;}
+#demo-manual-price-label[hidden] {display:none!important;}
+#demo-manual-result {white-space:pre-wrap;overflow-wrap:anywhere;color:#cbd9ea;padding:10px 0;}
+#demo-manual-check {display:flex;gap:10px;flex-wrap:wrap;align-items:center;}

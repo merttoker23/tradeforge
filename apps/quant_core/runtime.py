@@ -48,12 +48,10 @@ async def run_cycle(
     worker.progress.state.setdefault("loop_lag_ms", 0.0)
     worker.progress.advance("MARKET_HANDOFF")
     try:
-        worker.market_samples = () if internal_token else None
-        feed = (
-            await fetch_memory(session, internal_token)
-            if internal_token and session is not None
-            else None
-        )
+        # Standalone uses fixed local loopback; Compose keeps its authenticated
+        # service-to-service handoff. Neither mode needs additional user setup.
+        worker.market_samples = ()
+        feed = await fetch_memory(session, internal_token) if session is not None else None
         if feed is not None:
             worker.market_samples = tuple(
                 MarketSnapshot.model_validate_json(json.dumps(m)) for m in feed["markets"]

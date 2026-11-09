@@ -141,7 +141,10 @@ def decode_events(
         elif spec.name == "!markPrice@arr@1s":
             expected, positive, unsigned, signed = "markPriceUpdate", ("p", "i"), (), ("r",)
             if milliseconds(row.get("T")) < source:
-                raise ValueError("EXPIRED_FUNDING_TIME")
+                # Testnet can publish a stale next-funding timestamp for one
+                # symbol. Exclude that row without discarding valid peers or
+                # accepting stale funding evidence into readiness.
+                continue
         elif "@bookTicker" in spec.name:
             expected, positive, unsigned, signed = "bookTicker", ("b", "a"), ("B", "A"), ()
             exchange_sequence = _counter(row.get("u"))

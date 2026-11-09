@@ -1,0 +1,11 @@
+/* Read-only pre-strategy evidence. Never style it as an approved trade. */
+.tf-pretrade-preview { padding: 0.5rem 1rem 1rem; overflow-x: auto; }
+.tf-pretrade-preview .source-note { margin: 0.25rem 0 0.8rem; }
+.tf-pretrade-preview table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.tf-pretrade-preview th, .tf-pretrade-preview td {
+  text-align: left; padding: 0.65rem 0.5rem; border-bottom: 1px solid #263343;
+  white-space: nowrap;
+}
+.tf-pretrade-preview th { color: #97aabd; font-weight: 500; font-size: 0.70rem; letter-spacing: .04em; }
+.tf-pretrade-preview td { color: #c9d8e8; }
+.tf-pretrade-preview td:last-child { color: #dda966; }

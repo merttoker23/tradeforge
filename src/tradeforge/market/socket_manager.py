@@ -96,6 +96,20 @@ class AiohttpConnector:
         self.session: aiohttp.ClientSession | None = None
         self.clock_not_before = 0.0
 
+    def stream_url(self, route: Route) -> str:
+        """Demo still supports the legacy combined stream path.
+
+        Production uses the mandatory category paths. Testnet's demo host
+        accepts combined subscriptions on /stream, which preserves logical
+        public/market parsing while avoiding unsupported routed handshakes.
+        """
+        if route not in ("market", "public"):
+            raise ValueError("PUBLIC_MARKET_ROUTE_REQUIRED")
+        suffix = (
+            "/stream" if self.base_url == "https://demo-fstream.binance.com" else f"/{route}/stream"
+        )
+        return self.base_url + suffix
+
     async def __aenter__(self) -> "AiohttpConnector":
         async def reject_redirect(*args: object) -> None:
             raise StreamFailure("MARKET_REDIRECT_REJECTED")
@@ -120,7 +134,7 @@ class AiohttpConnector:
             raise ValueError("PUBLIC_MARKET_ROUTE_REQUIRED")
         try:
             async with self.session.ws_connect(
-                f"{self.base_url}/{route}/stream",
+                self.stream_url(route),
                 autoping=False,
                 heartbeat=None,
                 compress=0,

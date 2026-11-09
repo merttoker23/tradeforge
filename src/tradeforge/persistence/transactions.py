@@ -18,6 +18,13 @@ def migrate(db: Database, target: str) -> None:
         from sqlalchemy import text
 
         connection.execute(text("SELECT pg_advisory_xact_lock(74202002)"))
+        # The normal 5-second statement deadline protects runtime transactions,
+        # but a schema upgrade may need to backfill existing candle history.
+        # Raise it only for this transaction, after admission to the migration
+        # lock. PostgreSQL restores the normal deadline on commit or rollback.
+        # Leave lock_timeout unchanged so DDL still fails rather than waiting
+        # indefinitely on an active application writer.
+        connection.execute(text("SET LOCAL statement_timeout = '10min'"))
         config.attributes["connection"] = connection
         if target == "base":
             command.downgrade(config, "base")

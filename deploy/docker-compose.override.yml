@@ -1,0 +1,11 @@
+# Use with deploy/docker-compose.yml from inside deploy/: `docker compose up -d`.
+# Demo-only manual orders replace Guardian; no production execution capability.
+services:
+  dashboard:
+    # Authenticated HTTPS dashboard needs outgoing access to the fixed Testnet
+    # REST hostname for account reads and explicit manual demo order requests.
+    networks: [state, web, egress]
+  execution_guardian:
+    # Inactive unless explicitly invoked with this profile; the manual Testnet
+    # dashboard works without running the guardian service.
+    profiles: [legacy-guardian-disabled]

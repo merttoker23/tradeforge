@@ -164,14 +164,54 @@ def add_memory_route(
     app.router.add_post("/chart-request", memory)
 
 
+def add_loopback_memory_route(
+    app: web.Application, gateway: MarketGateway, persistence: GatewayPersistence
+) -> None:
+    """Read-only public market handoff for co-located standalone endpoints.
+
+    The HTTP listener must bind to 127.0.0.1, and this route independently
+    verifies both ends of the connection and the exact Host header. This
+    blocks remote access and browser-based DNS-rebinding/CORS requests.
+    Compose/VPS containers continue to use add_memory_route with their
+    existing internal bearer token instead.
+    """
+
+    async def memory(request: web.Request) -> web.Response:
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport else None
+        bound = transport.get_extra_info("sockname") if transport else None
+        if (
+            not peer
+            or peer[0] != "127.0.0.1"
+            or not bound
+            or bound[0] != "127.0.0.1"
+            or request.host != f"127.0.0.1:{bound[1]}"
+            or "Origin" in request.headers
+            or "Sec-Fetch-Site" in request.headers
+            or "Authorization" in request.headers
+        ):
+            raise web.HTTPForbidden()
+        return web.json_response(
+            memory_payload(gateway, persistence, quotes_only=request.path == "/quote-state"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    app.router.add_get("/market-state", memory)
+    app.router.add_get("/quote-state", memory)
+
+
 async def fetch_memory(
-    session: ClientSession, token: str, *, quotes_only: bool = False
+    session: ClientSession,
+    token: str | None,
+    *,
+    quotes_only: bool = False,
 ) -> dict[str, Any]:
+    """Local loopback when no token; existing authenticated Compose DNS otherwise."""
+    base = "http://127.0.0.1:8101" if token is None else "http://market_gateway:8101"
+    headers = {} if token is None else {"Authorization": "Bearer " + token}
     async with session.get(
-        "http://market_gateway:8101/quote-state"
-        if quotes_only
-        else "http://market_gateway:8101/market-state",
-        headers={"Authorization": "Bearer " + token},
+        base + ("/quote-state" if quotes_only else "/market-state"),
+        headers=headers,
         timeout=ClientTimeout(total=3),
         allow_redirects=False,
     ) as response:

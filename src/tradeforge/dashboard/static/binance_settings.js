@@ -27,7 +27,7 @@
   const active = {environment:"", credentials:{}};
   let environmentDirty = false, busy = false;
   const masked = element => element.dataset.masked === "true";
-  const status = message => {$("binance-feedback").textContent = message;};
+  const status = message => {$('binance-feedback').textContent = message;};
   async function call(path, method="GET", body=null) {
     const response = await fetch(path, {
       method,
@@ -39,7 +39,15 @@
     try {payload = await response.json();} catch {}
     if (!response.ok) {
       const code = typeof payload?.error === "string" ? payload.error : null;
-      if (response.status === 403) throw new Error("Yetki veya oturum doğrulanamadı");
+      // A 401/403 originates from the dashboard permission boundary, not Binance.
+      // Never retry a credential write without verified authorization or clear inputs.
+      if (response.status === 401 || response.status === 403) {
+        const detail = code === "SCOPE_REQUIRED" ?
+          "Bu oturumda API ayarlarını değiştirme yetkisi yok." :
+          response.status === 401 ? "Oturum süresi dolmuş veya geçersiz." :
+          "İstek sunucunun güvenlik denetimi tarafından reddedildi (403).";
+        throw new Error(detail + " İşlem sunucuya kaydedilmedi. Yetkili panel bağlantısını doğrulayın.");
+      }
       if (code && messages[code]) throw new Error(messages[code]);
       if (response.status === 400) throw new Error("İşlem reddedildi; girdi ve kilit durumunu denetleyin");
       if (response.status === 503) throw new Error("Sunucu ayarları (DB / binance-master) hazır değil");
@@ -63,7 +71,6 @@
     const key = $("binance-"+env+"-key"), secret = $("binance-"+env+"-secret");
     const apiKey = masked(key) ? "" : key.value.trim();
     const apiSecret = masked(secret) ? "" : secret.value.trim();
-    // Masks only mean "saved credentials exist"; they are never submitted.
     if (!masked(key)) key.classList.toggle("filled", apiKey !== "");
     if (!masked(secret)) secret.classList.toggle("filled", apiSecret !== "");
     $("binance-"+env+"-entry").textContent = masked(key) && masked(secret) ? "" :
@@ -127,8 +134,6 @@
       let message = null, failure = null;
       try {message = await callback();}
       catch (error) {failure = error;}
-      // Refresh even after a failed test so the last-test status reflects what
-      // the server recorded; the failure message still wins.
       try {await refresh();} catch {}
       if (failure) throw failure;
       if (message) status(message);
@@ -139,16 +144,13 @@
   for (const env of ["testnet","live"]) {
     for (const field of ["key","secret"]) {
       const element = $("binance-"+env+"-"+field);
-      element.addEventListener("focus", () => {
-        if (masked(element)) setMask(element, false);
-      });
+      element.addEventListener("focus", () => {if (masked(element)) setMask(element, false);});
       element.addEventListener("input", () => {
         element.dataset.typed = element.value.trim() ? "true" : "false";
         entryState(env);
       });
       element.addEventListener("blur", () => {
-        if (element.value.trim() === "" &&
-            (active.credentials[env] || {}).configured === true) {
+        if (element.value.trim() === "" && (active.credentials[env] || {}).configured === true) {
           delete element.dataset.typed;
           setMask(element, true);
         }
@@ -172,9 +174,7 @@
         throw new Error(names[env] + " için API anahtarı girilmedi; API Key ve Secret girip kaydedin.");
       }
       const result = await call("/api/binance/test","POST",{environment:env});
-      if (!result.connected) {
-        throw new Error(messages[result.reason] || (names[env] + " REST hesap testi başarısız"));
-      }
+      if (!result.connected) throw new Error(messages[result.reason] || (names[env] + " REST hesap testi başarısız"));
       return names[env] + " REST bağlantı testi başarılı.";
     }));
   }

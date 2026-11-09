@@ -162,19 +162,13 @@ def record_connection_test(db: Database, environment: str, connected: bool) -> N
     if not isinstance(environment, str) or environment not in ENDPOINTS:
         raise ValueError("BINANCE_ENVIRONMENT_INVALID")
     with db.transaction() as c:
-        updated = c.execute(
+        # A read-only connection test is not a configuration change. Updating
+        # the environment revision would fence and restart every pinned worker,
+        # interrupting Testnet market streams and analysis after each test.
+        c.execute(
             text(
                 "UPDATE binance_credentials SET last_test_at=clock_timestamp(), "
                 "last_test_ok=:connected WHERE environment=:environment"
             ),
             {"environment": environment, "connected": connected},
         )
-        # A recorded test is a configuration event: keep the revision display in
-        # step with what the operator just observed on the settings screen.
-        if updated.rowcount:
-            c.execute(
-                text(
-                    "UPDATE binance_runtime SET revision=revision+1, "
-                    "changed_at=clock_timestamp() WHERE id=1"
-                )
-            )

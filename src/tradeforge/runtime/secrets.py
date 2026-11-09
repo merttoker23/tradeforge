@@ -40,13 +40,16 @@ def read_secret(path: Path, *, maximum: int = 512) -> str:
     try:
         if os.name != "posix" or any(p.is_symlink() for p in (path, *path.parents)):
             raise ValueError
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
         with os.fdopen(fd, "r", encoding="utf-8") as stream:
             info = os.fstat(stream.fileno())
             if (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_mode & 0o077
-                or info.st_uid != os.geteuid()
+                or info.st_uid != getattr(os, "geteuid", lambda: -1)()
                 or info.st_nlink != 1
                 or not 0 < info.st_size <= 8192
             ):

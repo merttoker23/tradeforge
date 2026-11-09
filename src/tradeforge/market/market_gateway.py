@@ -76,7 +76,13 @@ class MarketGateway:
             self.canonical.configure((), ())
             return
         members = frozenset(i.symbol for i in observation.metadata.instruments)
-        new_plan = plan_subscriptions(members, watched=watched, deep=deep, protected=protected)
+        new_plan = plan_subscriptions(
+            members,
+            watched=watched,
+            deep=deep,
+            protected=protected,
+            streams_per_socket=100 if self.environment == "testnet" else 1024,
+        )
         if self.eligible != members:
             # A membership/plan change is a new ingestion epoch, not a cache merge.
             self._latest.clear()
@@ -446,6 +452,7 @@ class MarketGateway:
                                 on_state=state,
                                 clock=self.clock,
                                 monotonic=self.monotonic,
+                                ack_timeout=15 if self.environment == "testnet" else 5,
                             )
                             # A replacement manager must never reuse an old generation.
                             manager.generation = self._epoch << 32

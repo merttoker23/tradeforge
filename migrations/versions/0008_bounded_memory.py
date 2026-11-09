@@ -10,12 +10,20 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("ALTER TABLE closed_bar_observations ADD COLUMN content_hash text")
+    # Revision 0006 installs observation_immutable, which rejects *every* update
+    # to historical closed-bar evidence. Backfilling only the new derived hash
+    # requires a narrowly scoped migration exception. ALTER TABLE DDL is
+    # transactional in PostgreSQL: a failed UPDATE rolls back the trigger state
+    # together with the new column; other writers cannot see an unguarded table.
+    op.execute("ALTER TABLE closed_bar_observations DISABLE TRIGGER observation_immutable")
     # Legacy rows predate semantic identity. Their exact input hash is a safe
     # conservative backfill: one extra revision may be written after upgrade,
     # but no historical evidence is deleted or relabeled.
     op.execute(
         "UPDATE closed_bar_observations SET content_hash=input_hash WHERE content_hash IS NULL"
     )
+    # Reinstate immutable evidence before publishing any schema version change.
+    op.execute("ALTER TABLE closed_bar_observations ENABLE TRIGGER observation_immutable")
     op.execute("ALTER TABLE closed_bar_observations ALTER COLUMN content_hash SET NOT NULL")
     op.execute(
         "ALTER TABLE closed_bar_observations ADD CONSTRAINT closed_bar_content_hash_check "

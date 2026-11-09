@@ -62,7 +62,15 @@ def normalize_filters(raw: object) -> tuple[InstrumentFilters, QuantityLimits, s
         ):
             raise ValueError("UNSUPPORTED_POSITION_CONTROL")
         if name in {"MAX_NUM_ORDERS", "MAX_NUM_ALGO_ORDERS"}:
-            if type(item.get("limit")) is not int or item["limit"] <= 0:
+            # Binance USD-M may expose the order cap as `limit` or its
+            # documented typed field. A conflicting pair is never accepted.
+            field = "maxNumOrders" if name == "MAX_NUM_ORDERS" else "maxNumAlgoOrders"
+            values = [item[key] for key in ("limit", field) if key in item]
+            if (
+                not values
+                or any(type(value) is not int or value <= 0 for value in values)
+                or len(set(values)) != 1
+            ):
                 raise ValueError("INVALID_ORDER_LIMIT")
         if name == "PERCENT_PRICE":
             if (

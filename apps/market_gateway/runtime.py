@@ -154,7 +154,11 @@ async def serve(
         database.pin_environment(active.revision)
     gateway = MarketGateway(ClockSync(), environment=active.name)
     refresher = UniverseRefresher(
-        InstrumentRegistry(database), ExchangeInfoClient(environment=active.name)
+        InstrumentRegistry(database),
+        ExchangeInfoClient(
+            environment=active.name,
+            timeout=20 if active.name == "testnet" else 5,
+        ),
     )
     stop = asyncio.Event()
     recovery = MarketRecovery(
@@ -164,9 +168,16 @@ async def serve(
         gateway, database, require_admission=internal_token is not None
     )
     app = create_app(gateway, chart_demand=persistence.request_chart)
-    if internal_token is not None:
-        from tradeforge.runtime.market_link import add_memory_route
+    from tradeforge.runtime.market_link import add_loopback_memory_route, add_memory_route
 
+    if internal_token is None:
+        # Standalone services share public market evidence over loopback only.
+        # No token file, environment variable, or OS-specific setup is needed.
+        if host != "127.0.0.1" or port != 8101:
+            raise ValueError("LOCAL_MARKET_HANDOFF_REQUIRES_LOOPBACK_8101")
+        add_loopback_memory_route(app, gateway, persistence)
+    else:
+        # The existing authenticated Compose/VPS handoff is unchanged.
         add_memory_route(app, gateway, persistence, internal_token)
     runner = web.AppRunner(app, access_log=None)
     from tradeforge.runtime.surveillance import RuntimeSurveillance
@@ -245,7 +256,7 @@ async def serve(
                         stop,
                         watched=watched,
                         deep=deep,
-                        selection=surveillance.selection if internal_token else None,
+                        selection=surveillance.selection,
                     )
                 )
                 try:

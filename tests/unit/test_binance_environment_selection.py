@@ -124,7 +124,7 @@ def test_environment_switch_allows_without_restrictions():
     )
 
 
-def test_connection_test_bumps_configuration_revision_once_credentials_exist():
+def test_connection_test_keeps_active_environment_revision_stable():
     from contextlib import contextmanager
     from unittest.mock import MagicMock
 
@@ -142,10 +142,7 @@ def test_connection_test_bumps_configuration_revision_once_credentials_exist():
     record_connection_test(db, "testnet", True)
     statements = [str(x.args[0]) for x in c.execute.call_args_list]
     assert any("UPDATE binance_credentials" in statement for statement in statements)
-    assert any(
-        "UPDATE binance_runtime" in statement and "revision=revision+1" in statement
-        for statement in statements
-    )
+    assert not any("UPDATE binance_runtime" in statement for statement in statements)
 
 
 def test_connection_test_without_saved_credentials_leaves_revision_alone():

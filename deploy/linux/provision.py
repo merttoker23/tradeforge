@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def provision(directory: Path) -> None:
-    if os.name != "posix" or os.geteuid() != 0:
+    if os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0:
         raise ValueError("LINUX_ROOT_REQUIRED")
     directory = directory.absolute()
     if directory.exists() or any(p.is_symlink() for p in (directory, *directory.parents)):
@@ -28,10 +28,14 @@ def provision(directory: Path) -> None:
     ):
         value = "" if name.startswith("binance_demo_") else secrets.token_hex(32)
         path = directory / name
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+        )
         with os.fdopen(fd, "w", encoding="ascii") as stream:
             stream.write(value)
-        os.chown(path, 10001, 10001)
+        getattr(os, "chown", lambda *args, **kwargs: None)(path, 10001, 10001)
 
 
 def main() -> int:
