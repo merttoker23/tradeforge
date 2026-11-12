@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from tradeforge.market.exchange_info import FetchError, decode_payload, milliseconds
-from tradeforge.market.streams import MarketEvent, Route, StreamSpec, decode_events
+from tradeforge.market.streams import MarketEvent, Route, StreamSpec, decode_frame
 
 
 class StreamFailure(RuntimeError):
@@ -97,18 +97,10 @@ class AiohttpConnector:
         self.clock_not_before = 0.0
 
     def stream_url(self, route: Route) -> str:
-        """Demo still supports the legacy combined stream path.
-
-        Production uses the mandatory category paths. Testnet's demo host
-        accepts combined subscriptions on /stream, which preserves logical
-        public/market parsing while avoiding unsupported routed handshakes.
-        """
+        """Keep public depth and market data on their respective exchange routes."""
         if route not in ("market", "public"):
             raise ValueError("PUBLIC_MARKET_ROUTE_REQUIRED")
-        suffix = (
-            "/stream" if self.base_url == "https://demo-fstream.binance.com" else f"/{route}/stream"
-        )
-        return self.base_url + suffix
+        return f"{self.base_url}/{route}/stream"
 
     async def __aenter__(self) -> "AiohttpConnector":
         async def reject_redirect(*args: object) -> None:
@@ -117,7 +109,7 @@ class AiohttpConnector:
         trace = aiohttp.TraceConfig()
         trace.on_request_redirect.append(reject_redirect)
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=aiohttp.ClientTimeout(total=15),
             trust_env=False,
             cookie_jar=aiohttp.DummyCookieJar(),
             trace_configs=[trace],
@@ -186,6 +178,12 @@ async def pause(stop: asyncio.Event, seconds: float) -> None:
         pass
 
 
+def _discard(task: asyncio.Future) -> None:
+    """Retrieve a finished transport task's outcome so it is never reported."""
+    if not task.cancelled():
+        task.exception()
+
+
 class SocketManager:
     def __init__(
         self,
@@ -195,12 +193,17 @@ class SocketManager:
         eligible: Callable[[], frozenset[str]],
         on_event: Callable[[MarketEvent], None],
         on_state: Callable[[str, int], None],
+        on_streams: Callable[[tuple[StreamSpec, ...], tuple[StreamSpec, ...], int], None]
+        | None = None,
+        on_invalid_stream: Callable[[StreamSpec, int], None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
         jitter: Callable[[], float] = random.random,
         retry_base: float = 1,
         rotate_after: float = 23 * 3600 + 50 * 60,
         ack_timeout: float = 5,
+        max_future: float = 0,
+        clock_ready: Callable[[], bool] | None = None,
     ) -> None:
         if not streams or len(streams) > 1024 or len({s.route for s in streams}) != 1:
             raise ValueError("INVALID_SOCKET_GROUP")
@@ -208,12 +211,33 @@ class SocketManager:
             raise ValueError("INVALID_SOCKET_POLICY")
         self.streams, self.connect, self.eligible = streams, connect, eligible
         self.on_event, self.on_state = on_event, on_state
+        self.on_streams = on_streams or (lambda added, removed, generation: None)
+        self.on_invalid_stream = on_invalid_stream
         self.clock, self.monotonic, self.jitter = clock, monotonic, jitter
         self.retry_base, self.rotate_after, self.ack_timeout = retry_base, rotate_after, ack_timeout
+        self.max_future = max_future
+        self.clock_ready = clock_ready or (lambda: True)
         self.generation = self.failures = 0
         self.next_control = 0.0
         self.reconnects = 0
         self.reason = "NOT_CONNECTED"
+        # The desired stream set may change while the connection stays open.
+        # A discretionary rebalance must not restart the retained streams.
+        self._desired: tuple[StreamSpec, ...] = tuple(streams)
+        self._pending = False
+        # Streams removed by a live delta may still deliver a final frame.
+        # They are ignored, never treated as a protocol violation.
+        self._draining: set[str] = set()
+
+    def update(self, streams: tuple[StreamSpec, ...]) -> None:
+        """Replace the desired stream set without dropping the connection.
+
+        The retained streams keep their subscription, so their book, flow and
+        candle evidence is never interrupted by a discretionary rebalance.
+        """
+        if tuple(streams) != self._desired:
+            self._desired = tuple(streams)
+            self._pending = True
 
     async def _control(self) -> None:
         # Includes explicit PONGs. Four/s leaves headroom under Binance's ten/s.
@@ -231,6 +255,13 @@ class SocketManager:
                 began = self.monotonic()
                 retry_after = 0.0
                 try:
+                    # The connection waits for a trusted clock. Market evidence
+                    # of a skewed clock is rejected, and a rejected event would
+                    # restart the feed in a loop.
+                    while not self.clock_ready():
+                        if stop.is_set():
+                            return
+                        await asyncio.sleep(0.05)
                     async with self.connect(self.streams[0].route) as ws:
                         await self._control()
                         request_id = self.generation
@@ -238,13 +269,18 @@ class SocketManager:
                             ws.send_json(
                                 {
                                     "method": "SUBSCRIBE",
-                                    "params": [s.name for s in self.streams],
+                                    "params": [s.name for s in self._desired],
                                     "id": request_id,
                                 }
                             ),
                             5,
                         )
                         acknowledged, sequence = False, 0
+                        subscribed = {s.name for s in self._desired}
+                        invalidated: set[str] = set()
+                        last_valid = self.monotonic()
+                        pending = asyncio.ensure_future(ws.receive())
+                        pending.add_done_callback(_discard)
                         while not stop.is_set():
                             # A buffered receive (and ACK/ignored frame) may not
                             # suspend on Python 3.12. Leave probes and consumers
@@ -252,18 +288,74 @@ class SocketManager:
                             await asyncio.sleep(0)
                             if stop.is_set():
                                 break
+                            if self._pending:
+                                # A live subscription delta. The retained
+                                # streams keep their subscription, so their
+                                # book, flow and candle evidence survive.
+                                self._pending = False
+                                previous = self.streams
+                                desired = {s.name for s in self._desired}
+                                added = {s.name for s in self._desired} - subscribed
+                                removed = subscribed - desired
+                                if added or removed:
+                                    await self._control()
+                                    if added:
+                                        await asyncio.wait_for(
+                                            ws.send_json(
+                                                {
+                                                    "method": "SUBSCRIBE",
+                                                    "params": sorted(added),
+                                                    "id": request_id,
+                                                }
+                                            ),
+                                            5,
+                                        )
+                                    if removed:
+                                        await asyncio.wait_for(
+                                            ws.send_json(
+                                                {
+                                                    "method": "UNSUBSCRIBE",
+                                                    "params": sorted(removed),
+                                                    "id": request_id,
+                                                }
+                                            ),
+                                            5,
+                                        )
+                                subscribed = set(desired)
+                                invalidated.intersection_update(subscribed)
+                                self.streams = self._desired
+                                self._draining.update(removed)
+                                self.on_streams(
+                                    tuple(s for s in self._desired if s.name in added),
+                                    tuple(s for s in previous if s.name in removed),
+                                    self.generation,
+                                )
                             elapsed = self.monotonic() - began
                             if elapsed >= self.rotate_after:
                                 self.reason = "WS_ROTATION"
                                 break
                             if not acknowledged and elapsed > self.ack_timeout:
                                 raise StreamFailure("WS_ACK_TIMEOUT")
-                            try:
-                                frame = await asyncio.wait_for(ws.receive(), 0.5)
-                            except TimeoutError:
+                            # A pending receive must never be cancelled: the
+                            # transport marks the connection abnormally closed
+                            # when its read is cancelled, which would drop a
+                            # healthy group on every idle half second.
+                            done, _ = await asyncio.wait({pending}, timeout=0.5)
+                            if not done:
                                 continue
+                            try:
+                                frame = pending.result()
+                            except TimeoutError:
+                                # A transport read timeout is not a protocol
+                                # failure. The connection stays open and the
+                                # read is retried.
+                                pending = asyncio.ensure_future(ws.receive())
+                                pending.add_done_callback(_discard)
+                                continue
+                            pending = asyncio.ensure_future(ws.receive())
+                            pending.add_done_callback(_discard)
                             if frame.kind == "CLOSE":
-                                raise StreamFailure("WS_DISCONNECTED")
+                                raise StreamFailure(f"WS_DISCONNECTED_{frame.data}")
                             if frame.kind == "PING":
                                 if not isinstance(frame.data, bytes):
                                     raise StreamFailure("WS_INVALID_PING")
@@ -283,29 +375,63 @@ class SocketManager:
                                     if payload["result"] is not None:
                                         raise StreamFailure("WS_INVALID_ACK")
                                     acknowledged = True
+                                    last_valid = self.monotonic()
                                 continue
                             if not acknowledged:
                                 continue
-                            if payload.get("stream") not in {s.name for s in self.streams}:
+                            name = payload.get("stream")
+                            if not isinstance(name, str) or name not in subscribed:
+                                if isinstance(name, str) and name in self._draining:
+                                    # A final frame of a stream that a live
+                                    # delta unsubscribed. It is not evidence
+                                    # anymore and must not fail the group.
+                                    continue
                                 raise StreamFailure("WS_UNSUBSCRIBED_STREAM")
-                            events = decode_events(
-                                frame.data,
-                                route=self.streams[0].route,
-                                received_at=self.clock(),
-                                generation=self.generation,
-                                sequence=sequence,
-                                eligible=self.eligible(),
-                            )
+                            try:
+                                events = decode_frame(
+                                    payload,
+                                    route=self.streams[0].route,
+                                    received_at=self.clock(),
+                                    generation=self.generation,
+                                    sequence=sequence,
+                                    eligible=self.eligible(),
+                                    max_future=self.max_future,
+                                )
+                            except ValueError as error:
+                                stream = StreamSpec(name)
+                                if stream.symbol is None or self.on_invalid_stream is None:
+                                    raise
+                                # A malformed pair is fenced and resynchronized.
+                                # Independent pairs on this socket retain continuity.
+                                if name not in invalidated:
+                                    invalidated.add(name)
+                                    self.on_invalid_stream(stream, self.generation)
+                                if (
+                                    str(error) == "STALE_OR_FUTURE_MARKET_EVENT"
+                                    and self.monotonic() - last_valid > 10
+                                ):
+                                    raise StreamFailure("WS_STALE_BACKLOG") from None
+                                continue
+                            if events:
+                                last_valid = self.monotonic()
+                                invalidated.discard(name)
                             for event in events:
                                 self.on_event(event)
                             if elapsed >= 60:
                                 failures = 0
+                        pending.cancel()
                 except StreamFailure as error:
                     self.reason, retry_after = str(error), error.retry_after
                     failures += 1
                     self.failures += 1
                 except (ValueError, FetchError, OSError, TimeoutError):
                     self.reason = "WS_INVALID_OR_UNAVAILABLE"
+                    failures += 1
+                    self.failures += 1
+                except Exception:
+                    # Unexpected parser/socket defects reconnect a single group;
+                    # they must not terminate the gateway and every other feed.
+                    self.reason = "WS_INTERNAL_ERROR"
                     failures += 1
                     self.failures += 1
                 finally:

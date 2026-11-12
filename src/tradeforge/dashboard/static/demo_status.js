@@ -1,9 +1,7 @@
 "use strict";
-/* Read-only UI projections. This script never submits, authorizes, or replays orders.
-   The server's fixed-Testnet order endpoint remains the only order authority. */
+/* Read-only UI projections: quant-owned execution is verified from server telemetry. */
 (() => {
   let lastEnvironment = "";
-  let manualOrdersAvailable = false;
   let pending = false;
   const $ = id => document.getElementById(id);
 
@@ -23,17 +21,6 @@
 
   function setText(element, value) {
     if (element && element.textContent !== value) element.textContent = value;
-  }
-
-  function removeLegacyGuardianRows() {
-    for (const id of ["services", "data-health"]) {
-      const area = $(id);
-      if (!area) continue;
-      for (const row of area.querySelectorAll(".health-row")) {
-        const label = row.querySelector("span")?.textContent?.trim()?.toLowerCase();
-        if (label === "guardian" || label === "execution_guardian") row.remove();
-      }
-    }
   }
 
   function removeLegacyLiveBadge() {
@@ -79,8 +66,8 @@
   function renderStrategyPreview() {
     const context = strategyState();
     if (!context) return;
-    setText($("evaluation-note"), context.note);
-    const target = $("analysis-results");
+    setText($("engine-pair-note"), context.note);
+    const target = $("engine-preview");
     if (!target || target.querySelector(".tf-pretrade-preview")) return;
     const wrapper = document.createElement("div");
     wrapper.className = "tf-pretrade-preview";
@@ -120,27 +107,17 @@
 
   function sync() {
     removeLegacyLiveBadge();
-    removeLegacyGuardianRows();
     const environment = environmentName();
-    const modeText = environment === "testnet" ? "TESTNET · DEMO" :
+    const execution = currentSnapshot()?.execution_readiness;
+    const worker = (currentSnapshot()?.sections?.workers?.data || []).find(
+      row => row.service === "execution_core" && row.freshness === "OK"
+    );
+    const enabled = worker?.entries_enabled === true;
+    const modeText = environment === "testnet" ?
+      (execution?.ready === true && enabled ? "TESTNET · OTOMATİK EMİR AKTİF" :
+        enabled ? "TESTNET · EMİR AKIŞI BEKLİYOR" : "TESTNET · EMİR PASİF") :
       environment === "live" ? "CANLI PİYASA VERİSİ" : "Ortam ölçümü bekleniyor";
     setText($("runtime-mode"), modeText);
-    const manual = environment === "testnet" && manualOrdersAvailable;
-    if (environment === "testnet") {
-      setText($("execution-status"), manual ?
-        "Manuel Testnet emir formu açık" : "Testnet emir bağlantısı doğrulanıyor");
-      const execution = $("execution-status");
-      if (execution) execution.classList.toggle("ready", manual);
-      setText($("execution-note"), manual ?
-        "Yalnızca kullanıcı onaylı Testnet manuel emirleri gönderilir; otomatik strateji emirleri ayrı durumdur." :
-        "Testnet manuel emir uç noktası doğrulanıyor; otomatik emir yetkisi kapalıdır.");
-    }
-    const summary = $("guardian-summary");
-    if (summary) {
-      const label = summary.parentElement?.querySelector("span");
-      setText(label, "Testnet manuel emir");
-      setText(summary, manual ? "Form açık" : "Henüz doğrulanmadı");
-    }
     renderStrategyPreview();
   }
 
@@ -150,21 +127,7 @@
     queueMicrotask(() => {pending = false; sync();});
   }
 
-  window.addEventListener("tradeforge:demo-account", event => {
-    const detail = event.detail || {};
-    if (["testnet", "live"].includes(detail.environment)) lastEnvironment = detail.environment;
-    manualOrdersAvailable = detail.manual_orders_available === true;
-    schedule();
-  });
-  window.addEventListener("tradeforge:demo-unavailable", () => {
-    manualOrdersAvailable = false;
-    // Keep the last independently established environment rather than
-    // incorrectly displaying "Doğrulanamadı" when one GET times out.
-    schedule();
-  });
-
-  for (const id of ["runtime-mode", "services", "data-health", "guardian-summary",
-    "execution-status", "execution-note", "analysis-results", "evaluation-note"]) {
+  for (const id of ["runtime-mode",  "engine-pairs", "engine-pair-note", "engine-preview"]) {
     const element = $(id);
     if (element) new MutationObserver(schedule).observe(
       element, {subtree:true, childList:true, characterData:true}

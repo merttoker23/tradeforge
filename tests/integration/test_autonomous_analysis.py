@@ -61,10 +61,14 @@ def test_analysis_explains_each_symbol_strategy_and_side_without_raw_inputs(migr
     assert {r["side"] for r in rows} == {"LONG", "SHORT"}
     assert all(r["symbol"] == sample.instrument.symbol for r in rows)
     assert all(r["strategy"] == "MOMENTUM" for r in rows)
-    assert all(r["state"] == "NO_TRADE" and r["reasons"] == ["DATA_UNAVAILABLE"] for r in rows)
+    assert all(
+        r["state"] == "NO_TRADE" and r["reasons"] == ["DATA_UNAVAILABLE"]
+        for r in rows
+    )
     assert all(
         set(r)
-        <= {
+        <=
+        {
             "symbol",
             "side",
             "strategy",
@@ -78,3 +82,26 @@ def test_analysis_explains_each_symbol_strategy_and_side_without_raw_inputs(migr
         }
         for r in rows
     )
+
+
+def test_analysis_reports_latest_outcome_per_symbol_and_real_totals(migrated):
+    from tradeforge.runtime.analysis import AutonomousAnalysis
+
+    sample = evidence()
+    worker = AutonomousAnalysis(migrated, clock=lambda: sample.as_of)
+    assert worker.evaluate((change(sample, quality=DataQuality.GAP),)) == 0
+    summaries = worker.state["symbol_summaries"]
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["symbol"] == "ETHUSDT"
+    assert summary["decision"] == "NO_TRADE"
+    assert summary["analyzed_at"] == sample.as_of.isoformat()
+    assert "DATA_UNAVAILABLE" in summary["reasons"]
+    assert worker.state["analyzed_symbols"] == 1
+    assert worker.state["evaluation_total"] == 2
+    assert worker.state["analysis_cycle_total"] == 1
+
+    worker.evaluate((change(sample, quality=DataQuality.GAP),), symbols=frozenset({"ETHUSDT"}))
+    assert {row["symbol"] for row in worker.state["symbol_summaries"]} == {"ETHUSDT"}
+    assert worker.state["evaluation_total"] == 4
+    assert worker.state["analysis_cycle_total"] == 2

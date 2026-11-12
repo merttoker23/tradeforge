@@ -26,11 +26,14 @@ from tradeforge.market.runtime import GatewayPersistence, _merge_fresh
 from tradeforge.market.storage import load_bars
 from tradeforge.persistence.db import Database
 
-MAX_BODY = 4_000_000
+MAX_BODY = 32_000_000
+MAX_REQUEST_SYMBOLS = 512
 
 
 def memory_payload(
-    gateway: MarketGateway, persistence: GatewayPersistence, *, quotes_only: bool = False
+    gateway: MarketGateway, persistence: GatewayPersistence, *,
+    quotes_only: bool = False, symbols: frozenset[str] | None = None,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     at = gateway.clock()
     safe = gateway.clock_sync.ready(at, gateway.monotonic())
@@ -41,7 +44,10 @@ def memory_payload(
             "as_of": at.isoformat(),
             "clock_safe": safe,
             "eligible": sorted(gateway.eligible),
-            "quotes": [q.model_dump(mode="json") for q in persistence.display_quotes(at)],
+            "quotes": [
+            q.model_dump(mode="json") for q in persistence.display_quotes(at)
+            if symbols is None or q.symbol in symbols
+        ],
         }
     markets = {
         m.symbol: m
@@ -49,11 +55,13 @@ def memory_payload(
         if safe and m.symbol in gateway.eligible and m.costs_fresh(at, 15)
     }
     book_rows: list[object] = []
+    quoted_symbols = set()
     for (name, _), (event, _) in gateway._latest.items():
         if "@bookTicker" not in name or gateway._generations.get(name) != event.generation:
             continue
         if not 0 <= (at - event.event_time).total_seconds() <= 5:
             continue
+        quoted_symbols.add(event.symbol)
         book_rows.append(
             {
                 "symbol": event.symbol,
@@ -62,6 +70,17 @@ def memory_payload(
                 "askPrice": str(event.values["a"]),
             }
         )
+    if safe and getattr(gateway, "full_depth", False) and gateway.environment == "testnet":
+        for symbol, book in gateway.canonical.books.items():
+            if symbol in quoted_symbols:
+                continue
+            top = book.top_of_book(at)
+            if top is not None:
+                stamp, bid, ask = top
+                book_rows.append({
+                    "symbol": symbol, "time": int(stamp.timestamp() * 1000),
+                    "bidPrice": str(bid), "askPrice": str(ask),
+                })
     markets = {
         m.symbol: m
         for m in _merge_fresh(
@@ -75,9 +94,12 @@ def memory_payload(
     deep_status = []
     ready_symbols = set()
     for symbol, book in gateway.canonical.books.items():
+        if symbols is not None and symbol not in symbols:
+            continue
         ready = safe and gateway.canonical.symbol_ready(symbol, at)
         if ready:
             ready_symbols.add(symbol)
+        flow = gateway.canonical.flows.get(symbol)
         reason = (
             "CLOCK_UNSAFE"
             if not safe
@@ -88,13 +110,13 @@ def memory_payload(
             else "BOOK_UNAVAILABLE"
             if book.state_at(at) is not StreamState.READY
             else "FLOW_UNAVAILABLE"
-            if gateway.canonical.flows[symbol].snapshot(at).validity is not DataQuality.OK
+            if flow is not None and flow.validity_at(at) is not DataQuality.OK
             else (gateway.canonical.bar_rejections(symbol, at) or ("CANONICAL_DATA_NOT_READY",))[0]
             if not ready
             else "READY"
         )
         deep_status.append({"symbol": symbol, "ready": ready, "reason": reason})
-    if safe:
+    if safe and not summary_only:
         for symbol, book in gateway.canonical.books.items():
             if symbol not in ready_symbols:
                 continue
@@ -128,36 +150,97 @@ def memory_payload(
         "status": status,
         "clock_safe": safe,
         "eligible": sorted(gateway.eligible),
-        "quotes": [q.model_dump(mode="json") for q in persistence.display_quotes(at)],
-        "markets": [m.model_dump(mode="json") for m in markets.values()],
-        "deep": deep,
-        "deep_status": deep_status,
+        "quotes": [] if summary_only else [
+            q.model_dump(mode="json") for q in persistence.display_quotes(at)
+            if symbols is None or q.symbol in symbols
+        ],
+        "markets": [
+            m.model_dump(mode="json") for m in markets.values()
+            if symbols is None or m.symbol in symbols
+        ],
+        "deep": [r for r in deep if symbols is None or r["symbol"] in symbols],
+        "deep_status": [
+            r for r in deep_status if symbols is None or r["symbol"] in symbols
+        ],
     }
 
 
+def requested_symbols(request: web.Request) -> frozenset[str] | None:
+    if set(request.query) - {"symbols", "detail"} or (
+        "detail" in request.query
+        and (request.path != "/market-state" or request.query.getall("detail") != ["summary"])
+    ):
+        raise web.HTTPBadRequest()
+    if "symbols" not in request.query:
+        return None
+    parts = request.query["symbols"].split(",")
+    if not 1 <= len(parts) <= MAX_REQUEST_SYMBOLS or any(
+        re.fullmatch(r"[A-Z0-9_]{2,40}", part) is None for part in parts
+    ) or len(parts) != len(set(parts)):
+        raise web.HTTPBadRequest()
+    return frozenset(parts)
+
+
 def add_memory_route(
-    app: web.Application, gateway: MarketGateway, persistence: GatewayPersistence, token: str
+    app: web.Application,
+    gateway: MarketGateway,
+    persistence: GatewayPersistence,
+    token: str,
+    *,
+    loopback: bool = False,
 ) -> None:
     if len(token) < 43:
         raise ValueError("INTERNAL_TOKEN_REQUIRED")
 
-    async def memory(request: web.Request) -> web.Response:
+    def verified(request: web.Request) -> bool:
         if (
-            len(request.headers.getall("Authorization", [])) != 1
-            or not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)
-            or "Origin" in request.headers
-            or "Sec-Fetch-Site" in request.headers
+            len(request.headers.getall("Authorization", [])) == 1
+            and hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)
+            and "Origin" not in request.headers
+            and "Sec-Fetch-Site" not in request.headers
         ):
+            return True
+        if not loopback or request.method != "GET":
+            return False
+        # A co-located dashboard has no token file. Its read-only feed is
+        # accepted only from the loopback listener itself, exactly like the
+        # tokenless route, so a remote or browser-originated request still
+        # cannot read market memory without the bearer token.
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport else None
+        bound = transport.get_extra_info("sockname") if transport else None
+        return bool(
+            peer
+            and peer[0] == "127.0.0.1"
+            and bound
+            and bound[0] == "127.0.0.1"
+            and request.host == f"127.0.0.1:{bound[1]}"
+            and "Origin" not in request.headers
+            and "Sec-Fetch-Site" not in request.headers
+            and "Authorization" not in request.headers
+        )
+
+    async def memory(request: web.Request) -> web.Response:
+        if not verified(request):
             raise web.HTTPForbidden()
         if request.path == "/chart-request":
             if set(request.query) != {"symbol", "timeframe"}:
                 raise web.HTTPBadRequest()
             persistence.request_chart(request.query["symbol"], request.query["timeframe"])
             return web.json_response({"status": "REQUESTED"}, status=202)
-        return web.json_response(
-            memory_payload(gateway, persistence, quotes_only=request.path == "/quote-state"),
-            headers={"Cache-Control": "no-store"},
-        )
+        selected = requested_symbols(request)
+        if request.query.get("detail") == "summary":
+            payload = memory_payload(gateway, persistence, symbols=selected, summary_only=True)
+        elif selected is None:
+            payload = memory_payload(
+                gateway, persistence, quotes_only=request.path == "/quote-state"
+            )
+        else:
+            payload = memory_payload(
+                gateway, persistence, quotes_only=request.path == "/quote-state",
+                symbols=selected,
+            )
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/market-state", memory)
     app.router.add_get("/quote-state", memory)
@@ -191,10 +274,19 @@ def add_loopback_memory_route(
             or "Authorization" in request.headers
         ):
             raise web.HTTPForbidden()
-        return web.json_response(
-            memory_payload(gateway, persistence, quotes_only=request.path == "/quote-state"),
-            headers={"Cache-Control": "no-store"},
-        )
+        selected = requested_symbols(request)
+        if request.query.get("detail") == "summary":
+            payload = memory_payload(gateway, persistence, symbols=selected, summary_only=True)
+        elif selected is None:
+            payload = memory_payload(
+                gateway, persistence, quotes_only=request.path == "/quote-state"
+            )
+        else:
+            payload = memory_payload(
+                gateway, persistence, quotes_only=request.path == "/quote-state",
+                symbols=selected,
+            )
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/market-state", memory)
     app.router.add_get("/quote-state", memory)
@@ -205,13 +297,21 @@ async def fetch_memory(
     token: str | None,
     *,
     quotes_only: bool = False,
+    symbols: frozenset[str] | None = None,
+    summary_only: bool = False,
+    base: str | None = None,
 ) -> dict[str, Any]:
-    """Local loopback when no token; existing authenticated Compose DNS otherwise."""
-    base = "http://127.0.0.1:8101" if token is None else "http://market_gateway:8101"
+    """Explicit base wins; otherwise loopback without a token, Compose DNS with one."""
+    if base is None:
+        base = "http://127.0.0.1:8101" if token is None else "http://market_gateway:8101"
     headers = {} if token is None else {"Authorization": "Bearer " + token}
+    params = {"detail": "summary"} if summary_only else {}
+    if symbols and len(symbols) <= MAX_REQUEST_SYMBOLS:
+        params["symbols"] = ",".join(sorted(symbols))
     async with session.get(
         base + ("/quote-state" if quotes_only else "/market-state"),
         headers=headers,
+        params=params or None,
         timeout=ClientTimeout(total=3),
         allow_redirects=False,
     ) as response:
@@ -237,6 +337,7 @@ def alpha_inputs(
     *,
     evaluated_at: datetime | None = None,
     diagnostics: dict[str, Any] | None = None,
+    symbols: frozenset[str] | None = None,
 ) -> tuple[MomentumInput, ...]:
     """Join evidence known at evaluation, retaining the feature candle revision."""
     feed_at = utc(datetime.fromisoformat(feed["as_of"]))
@@ -272,8 +373,11 @@ def alpha_inputs(
                 }
                 else "CANONICAL_DATA_NOT_READY",
             )
-    deep = feed["deep"]
-    if len(deep) > 16:
+    deep = (
+        [row for row in feed["deep"] if row.get("symbol") in symbols]
+        if symbols is not None else feed["deep"]
+    )
+    if len(deep) > 2048:
         raise ValueError("MARKET_HANDOFF_CAPACITY")
     if feed["status"].get("data_ready") is not True:
         for row in deep:

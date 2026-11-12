@@ -137,7 +137,6 @@ def test_postgres_has_internal_network_and_no_published_host_ports() -> None:
         "postgres",
         "market_gateway",
         "quant_core",
-        "execution_guardian",
         "dashboard",
         "caddy",
         "migrate",

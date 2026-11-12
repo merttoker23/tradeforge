@@ -18,9 +18,11 @@ class RuntimeSurveillance:
     def __init__(self, gateway: MarketGateway, db: Database) -> None:
         self.gateway, self.db = gateway, db
         # Applying a plan restarts socket groups. Leave time for both 60s flow
-        # windows to warm before the next discretionary rebalance.
+        # windows to warm before the next discretionary rebalance. The demo
+        # endpoint also closes connections periodically, so a short cadence
+        # would keep some deep symbols permanently inside a warm-up window.
         self.allocator = SubscriptionAllocator(
-            SurveillancePolicy(rebalance_seconds=300, dwell_seconds=600)
+            SurveillancePolicy(rebalance_seconds=900, dwell_seconds=1200)
         )
         self.watch: tuple[str, ...] = ()
         self.deep: tuple[str, ...] = ()
@@ -49,14 +51,14 @@ class RuntimeSurveillance:
                 .scalars()
                 .all()
             )
-            guardian = c.execute(
-                text("SELECT payload FROM runtime_observations WHERE service='execution_guardian'")
+            executor = c.execute(
+                text("SELECT payload FROM runtime_observations WHERE service='execution_core'")
             ).first()
         resource_pressure = 0.0
-        if guardian is not None:
+        if executor is not None:
             try:
                 resource_pressure = min(
-                    1.0, max(0.0, float(guardian.payload.get("resource_pressure", 0.0)))
+                    1.0, max(0.0, float(executor.payload.get("resource_pressure", 0.0)))
                 )
             except (TypeError, ValueError):
                 resource_pressure = 0.0

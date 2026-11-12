@@ -16,7 +16,7 @@ REVIEWED_MIGRATIONS = {
 IMAGE = "ghcr.io/" + REPOSITORY
 AUDIENCE = "https://forgetrade.tech/_tradeforge/deploy"
 WORKFLOW = REPOSITORY + "/.github/workflows/ci.yml@refs/heads/main"
-APPLICATIONS = ("market_gateway", "quant_core", "execution_guardian", "dashboard")
+APPLICATIONS = ("market_gateway", "quant_core", "dashboard")
 IDENTIFIER = r"[a-z][a-z0-9_]{0,62}"
 TYPE = (
     r"(?:text|uuid|boolean|bigint|integer|smallint|numeric|timestamptz|jsonb|bytea|date"

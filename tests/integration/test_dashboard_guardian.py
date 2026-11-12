@@ -4,13 +4,13 @@ from tests.integration.test_dashboard_control import request, seed, setup
 from tests.integration.test_protection_recovery import prepared
 
 
-def test_dashboard_stopped_does_not_stop_guardian_protection(seeded):
+def test_dashboard_stopped_does_not_stop_embedded_protection(seeded):
     from tradeforge.dashboard.api import create_app
 
     db, _, client, recovery, _ = prepared(seeded)
     unused_dashboard = create_app()
     assert unused_dashboard is not None
-    # No dashboard listener or task is running. Guardian still repairs the stop.
+    # No dashboard listener or task is running. Embedded protection still repairs the stop.
     recovery.reconcile()
     assert recovery.ready
     assert any(method == "POST" and "algoOrder" in path for method, path, _ in client.calls)
@@ -20,8 +20,8 @@ def test_dashboard_stopped_does_not_stop_guardian_protection(seeded):
     assert {row["kind"] for row in protectors} == {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
 
 
-def test_guardian_cycle_processes_pause_before_entry_and_preserves_recovery(migrated):
-    from apps.execution_guardian.runtime import guardian_cycle
+def test_execution_cycle_processes_pause_before_entry_and_preserves_recovery(migrated):
+    from tradeforge.runtime.auto_execution import execution_cycle
 
     at, _, risk, commands = setup(migrated)
     risk.set_kill_switch(False, reason="TEST_SETUP")
@@ -45,5 +45,5 @@ def test_guardian_cycle_processes_pause_before_entry_and_preserves_recovery(migr
             assert risk.state().kill_switch
             calls.append("worker")
 
-    guardian_cycle(Recovery(), Stream(), Worker(), commands)
+    execution_cycle(Recovery(), Stream(), Worker(), commands)
     assert calls == ["protection", "stream", "worker"]

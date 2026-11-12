@@ -177,7 +177,8 @@ def test_quant_consumes_closed_bars_and_restart_does_not_duplicate(migrated):
         assert c.scalar(text("SELECT count(*) FROM execution_intents")) == 0
     view = ReadModel(migrated, clock=lambda: now).snapshot()
     assert view["sections"]["opportunities"]["data"]
-    assert view["sections"]["regime"]["status"] == "UNKNOWN"
+    assert view["sections"]["regime"]["status"] == "OK"
+    assert view["sections"]["regime"]["data"][0]["label"] == "UNKNOWN"
     # A running worker cannot renew the timestamp of a completed analysis.
     late = QuantWorker(migrated, clock=lambda: now + timedelta(hours=1)).tick()
     assert late["data_ready"] is False

@@ -47,20 +47,29 @@ def seed_history(detector: RegimeEngine, bars: list[ClosedBar], frame: MarketFra
             for key, tail in sorted(tails.items())
         ]
     )
-    benchmark = next((v for k, v in tails.items() if k[2] == "BTCUSDT"), [])
-    btc_returns = {
-        b.open_at: float(b.close.ln() - a.close.ln())
-        for a, b in zip(benchmark, benchmark[1:], strict=False)
-    }
+    benchmark = next(
+        (row for row in frame.observations if row.instrument.symbol == "BTCUSDT"), None
+    )
+    # Benchmark returns are keyed by the benchmark bar's own open time, so any
+    # member's contiguous history can align with it. Deriving the map from the
+    # benchmark's retained history instead of its warmup tail keeps a member
+    # with a longer history from losing every paired sample.
+    btc_returns: dict[object, float] = {}
+    if benchmark is not None:
+        ordered = sorted(series[benchmark.current.key].values(), key=lambda b: b.open_at)
+        for a, b in zip(ordered, ordered[1:], strict=False):
+            if b.open_at - a.open_at == step:
+                btc_returns[b.open_at] = float(b.close.ln() - a.close.ln())
     for key, tail in tails.items():
         stats = detector._new_series()
         for a, b in zip(tail, tail[1:], strict=False):
             value = float(b.close.ln() - a.close.ln())
             stats.vol.add(value)
             stats.cusum.add(value)
-            if b.open_at in btc_returns:
-                stats.pair.add(btc_returns[b.open_at], value)
-            else:
-                stats.pair = detector._new_pair()
+            benchmark_return = btc_returns.get(b.open_at)
+            if benchmark_return is not None:
+                stats.pair.add(benchmark_return, value)
+            # An unaligned bar carries no benchmark return. It is skipped
+            # instead of resetting the retained paired history.
         stats.last_close = tail[-1].close
         detector._series[key] = stats

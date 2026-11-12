@@ -12,7 +12,7 @@ from tradeforge.domain.common import ReasonCode
 from tradeforge.domain.risk import TradingReadiness
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = "0008"
+SCHEMA_VERSION = "0009"
 DATABASE_FAILURES = {
     "57014": "DB_STATEMENT_TIMEOUT",
     "55P03": "DB_LOCK_TIMEOUT",

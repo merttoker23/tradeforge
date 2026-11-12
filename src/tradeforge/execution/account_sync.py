@@ -86,7 +86,7 @@ def read_account(client: BinanceTestnetClient, at: datetime) -> AccountView:
 def cleanup_flat_testnet(client: BinanceTestnetClient) -> int:
     """Explicit operator cleanup; never remove protection from an open position."""
     if client.environment != "testnet" or client.read_only:
-        raise EntryHalt("TESTNET_GUARDIAN_REQUIRED")
+        raise EntryHalt("TESTNET_EXECUTION_REQUIRED")
     view = read_account(client, client.clock())
     if view.positions or view.orders:
         raise EntryHalt("FLAT_ACCOUNT_REQUIRED")

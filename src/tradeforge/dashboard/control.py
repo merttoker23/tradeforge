@@ -1,4 +1,4 @@
-"""Durable command inbox. Only guardian consumption may alter portfolio controls."""
+"""Durable command inbox. Only server-side execution consumption may alter portfolio controls."""
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -66,7 +66,7 @@ class CommandQueue:
             _audit(c, "dashboard.chart.v1", body)
 
 
-class GuardianCommands:
+class ExecutionCommands:
     def __init__(self, db: Database, *, clock: Callable[[], datetime] | None = None) -> None:
         self.db = db
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -116,13 +116,13 @@ class GuardianCommands:
                 elif request.expected_version != old.version:
                     result = "RISK_VERSION_CONFLICT"
                 elif request.action.startswith("testnet_") and not testnet:
-                    result = "TESTNET_GUARDIAN_REQUIRED"
+                    result = "TESTNET_EXECUTION_REQUIRED"
                 elif request.action == "testnet_cleanup" and not old.kill_switch:
                     result = "PAUSE_REQUIRED"
                 elif request.action == "testnet_cleanup" and cleanup is None:
-                    result = "TESTNET_GUARDIAN_REQUIRED"
+                    result = "TESTNET_EXECUTION_REQUIRED"
                 elif request.action in {"resume", "kill_off", "testnet_start"} and not ready():
-                    result = "GUARDIAN_NOT_READY"
+                    result = "EXECUTION_CORE_NOT_READY"
                 else:
                     if request.action == "testnet_cleanup":
                         assert cleanup is not None

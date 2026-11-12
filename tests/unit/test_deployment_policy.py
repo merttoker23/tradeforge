@@ -116,7 +116,7 @@ def test_binance_role_grants_are_limited_to_reviewed_revision():
     from deploy.automation.runtime import BINANCE_0007_GRANTS
 
     assert "REVOKE ALL ON public.binance_credentials FROM tf_market" in BINANCE_0007_GRANTS
-    assert "GRANT SELECT ON public.binance_credentials TO tf_dashboard, tf_guardian" in (
+    assert "GRANT SELECT ON public.binance_credentials TO tf_dashboard, tf_quant" in (
         BINANCE_0007_GRANTS
     )
     assert "GRANT INSERT, UPDATE ON public.binance_credentials TO tf_dashboard" in (

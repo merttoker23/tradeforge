@@ -35,7 +35,7 @@ class Database:
     def transaction(self):
         yield self
 
-    def execute(self, statement):
+    def execute(self, statement, parameters=None):
         return Rows(self.rows)
 
 

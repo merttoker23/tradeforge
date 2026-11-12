@@ -149,7 +149,7 @@ def publish_approved(db: Database, record: Record, evidence: ValidationEvidence)
         or approval_reasons(record.discovery, evidence, at, record.policy)
     ):
         raise EntryHalt("AUTONOMOUS_APPROVAL_REQUIRED")
-    # Leave headroom for the guardian's worst-price risk recheck and lot rounding.
+    # Leave headroom for the execution engine's worst-price risk recheck and lot rounding.
     step = quant.request.filters.step_size
     assert proposal.stop_proposal is not None
     qty = (quant.sized.qty * Decimal("0.9") / step).to_integral_value(rounding=ROUND_FLOOR) * step

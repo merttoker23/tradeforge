@@ -239,11 +239,16 @@ test("quote refresh is single flight and a selection replaces its obsolete subsc
 });
 
 test("health presentation distinguishes worker health, data, analysis and execution readiness",async()=>{
-  const a=await app();a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",healthy:true,data_ready:true,analysis_ready:false,execution_ready:false,stage:"FEATURES_UNAVAILABLE",last_progress_at:new Date().toISOString(),error_count:0}]};
+  const a=await app();a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",healthy:true,data_ready:true,analysis_ready:false,execution_ready:false,stage:"FEATURES_UNAVAILABLE",error_count:0}]};
   a.context.render(a.data);
-  const text=a.get("data-health").children.map(row=>row.children.map(cell=>cell.textContent).join(" ")).join(" ");
-  assert.match(text,/quant_core/);assert.match(text,/Analiz.*Hazır değil/);assert.match(text,/Emir.*Hazır değil/);assert.match(text,/FEATURES_UNAVAILABLE/);
+  const content=e=>e.textContent+" "+e.children.map(content).join(" ");
+  const service=content(a.get("services"));
+  assert.match(service,/Analiz motoru/);assert.match(service,/quant_core/);
+  assert.match(service,/Analiz hazır değil/);assert.match(service,/Emir kapısı hazır değil/);
+  assert.match(service,/FEATURES_UNAVAILABLE/);
+  assert.match(content(a.get("data-health")),/Veri hazırlığı/);
 });
+
 
 test("uncached snapshot, symbols and chart all refresh under the API's fail-immediate DB busy lock",async()=>{
   const a=await app({busySemantics:true});
@@ -321,22 +326,23 @@ test("disorder explains strategy incompatibility without manufacturing an evalua
   a.context.render(a.data);
   assert.match(a.get("algorithm-headline").textContent,/Stratejiler.*uygun değil/);
   assert.doesNotMatch(a.get("algorithm-headline").textContent,/Tetik izleniyor/);
-  assert.match(a.get("evaluated-count").textContent,/^0 /);
+  assert.match(a.get("evaluated-count").textContent,/^0 yön/);
 });
+
 
 test("cycle, new analysis, source and strategy evaluation have distinct evidence times",async()=>{
   const a=await app(),at="2026-11-03T01:00:00Z",analysis="2026-11-03T00:58:00Z",source="2026-11-03T00:44:59.999Z",evaluation="2026-11-03T00:59:00Z";
-  a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",last_success_at:at,last_analysis_at:analysis,last_analysis_source_at:source,last_evaluation_at:evaluation,evaluated_count:0,selected_deep_count:8,ready_deep_count:3,input_rejections:[{symbol:"ETHUSDT",reason:"BOOK_UNAVAILABLE"}]}]};
+  a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",last_success_at:at,last_analysis_at:analysis,last_analysis_source_at:source,last_evaluation_at:evaluation,evaluated_count:0,selected_deep_count:8,ready_deep_count:3,last_input_check:{as_of:at,input_rejections:[{symbol:"ETHUSDT",reason:"BOOK_UNAVAILABLE"}]}}]};
   a.context.render(a.data);
-  assert.equal(a.get("cycle-time").textContent,"04:00:00 TRT");
+  assert.equal(a.get("success-time").textContent,"04:00:00 TRT");
   assert.equal(a.get("analysis-time").textContent,"03:58:00 TRT");
   assert.equal(a.get("analysis-source-time").textContent,"03:44:59 TRT");
   assert.equal(a.get("evaluation-time").textContent,"03:59:00 TRT");
-  const pipeline=a.get("pipeline").children.map(r=>r.children.map(c=>c.textContent).join(" ")).join(" ");
-  assert.match(pipeline,/Seçili derin 8/);assert.match(pipeline,/Hazır derin 3/);
-  const content=element=>element.textContent+" "+element.children.map(content).join(" ");
-  const rejected=content(a.get("input-rejections"));
-  assert.match(rejected,/ETHUSDT/);assert.match(rejected,/Emir defteri/);
+  const content=e=>e.textContent+" "+e.children.map(content).join(" ");
+  assert.match(content(a.get("pipeline")),/Seçili derin 8/);
+  assert.match(content(a.get("pipeline")),/Hazır derin 3/);
+  assert.match(content(a.get("engine-input-rejections")),/ETHUSDT/);
+  assert.match(content(a.get("engine-input-rejections")),/Emir defteri/);
 });
 
 
@@ -357,38 +363,85 @@ test("missing input rejection telemetry is unknown rather than a zero rejection 
   const a=await app();
   a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK"}]};
   a.context.render(a.data);
-  assert.match(a.get("input-rejections").children[0].textContent,/ölçümü bekleniyor/);
+  assert.match(a.get("engine-input-rejections-note").textContent,/ölçülmedi/);
+  assert.match(a.get("engine-input-rejections").children[0].textContent,/ölçümü yok/);
 });
 
+
 test("last completed strategy results stay visible through empty cycles and transport loss",async()=>{
-  const a=await app();
-  const last={as_of:"2026-11-03T00:59:00Z",evaluated_count:2,reason_counts:{SPREAD_GATE:2},symbol_results:[{symbol:"BTCUSDT",strategy:"REVERSAL",side:"LONG",state:"ARMED",reasons:["SPREAD_GATE"]}],input_rejections:[{symbol:"ETHUSDT",reason:"BOOK_UNAVAILABLE"}]};
-  const quant={service:"quant_core",freshness:"OK",analysis_ready:true,regime_label:"RANGE",evaluated_count:0,symbol_results:[],reason_counts:{},input_rejections:[],last_input_check:{as_of:last.as_of,input_rejections:last.input_rejections},last_evaluation:last};
-  a.data.sections.workers={status:"OK",data:[quant]};
-  a.data.execution_readiness={ready:true,entries_enabled:true,reason:"READY",blockers:[]};
-  a.data.analysis_readiness={ready:true};
+  const a=await app();const now=new Date().toISOString();
+  a.data.status="OK";
+  a.data.live_analysis={engine:{state:"ACTIVE",regime:"RANGE"},pairs:{eligible:2,scanned:2,analyzed:1,evaluated:2},pairs_detail:[{symbol:"BTCUSDT",stage:"DEEP",decision:"LONG",strategy:"REVERSAL",reasons:["SPREAD_GATE"],analyzed_at:now,as_of:now}],pipeline:[],connections:{},rates:{},latency:{},errors:[]};
+  a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",last_evaluation:{reason_counts:{SPREAD_GATE:2}},last_input_check:{as_of:now,input_rejections:[{symbol:"ETHUSDT",reason:"BOOK_UNAVAILABLE"}]}}]};
   const content=e=>e.textContent+" "+e.children.map(content).join(" ");
   a.context.render(a.data);
-  assert.match(content(a.get("analysis-results")),/BTCUSDT/);
-  assert.match(content(a.get("rejection-reasons")),/Alış ve satış farkı yüksek.*2/);
-  assert.match(content(a.get("input-rejections")),/ETHUSDT/);
-  assert.match(a.get("evaluation-note").textContent,/03:59:00 TRT/);
-  assert.doesNotMatch(a.get("algorithm-headline").textContent,/Tetik izleniyor/);
-  assert.equal(a.get("decision").textContent,"NO_TRADE");
-
+  assert.match(content(a.get("engine-pairs")),/BTCUSDT/);
+  assert.match(content(a.get("engine-rejection-reasons")),/Alış ve satış farkı yüksek/);
+  assert.match(content(a.get("engine-input-rejections")),/ETHUSDT/);
   a.context.stale("Disconnected");
-  assert.match(content(a.get("analysis-results")),/BTCUSDT/);
-  assert.match(content(a.get("rejection-reasons")),/Alış ve satış farkı yüksek/);
-  assert.match(content(a.get("input-rejections")),/ETHUSDT/);
-  assert.match(a.get("evaluation-note").textContent,/Güncel değil/);
-  assert.equal(a.get("decision").textContent,"NO_TRADE");
-
-  quant.last_evaluation={...last,as_of:"2026-11-03T01:01:00Z",reason_counts:{LIQUIDITY_GATE:1},symbol_results:[{symbol:"SOLUSDT",strategy:"MOMENTUM",side:"SHORT",state:"NO_TRADE",reasons:["LIQUIDITY_GATE"]}],input_rejections:[]};
-  quant.last_input_check={as_of:"2026-11-03T01:01:00Z",input_rejections:[]};
+  assert.match(content(a.get("engine-pairs")),/BTCUSDT/);
+  assert.match(content(a.get("ov-detail")),/güncel kabul edilmez/);
+  assert.match(a.get("ov-page-summary").textContent,/son doğrulanmış veri/);
+  a.data.live_analysis.pairs_detail=[{symbol:"SOLUSDT",stage:"DEEP",decision:"NO_TRADE",strategy:"MOMENTUM",reasons:["LIQUIDITY_GATE"],analyzed_at:now,as_of:now}];
   a.pushSnapshot();
-  assert.match(content(a.get("analysis-results")),/SOLUSDT/);
-  assert.doesNotMatch(content(a.get("analysis-results")),/BTCUSDT/);
-  assert.match(content(a.get("rejection-reasons")),/likidite yetersiz/);
-  assert.doesNotMatch(content(a.get("input-rejections")),/ETHUSDT/);
-  assert.match(a.get("evaluation-note").textContent,/04:01:00 TRT/);
+  assert.match(content(a.get("engine-pairs")),/SOLUSDT/);
+  assert.doesNotMatch(content(a.get("engine-pairs")),/BTCUSDT/);
+});
+
+
+test("live analysis center shows real pairs, pipeline and explicit disconnect",async()=>{
+  const a=await app(),now=new Date().toISOString();a.data.status="OK";
+  a.data.sections.universe={status:"OK",data:[{eligible:340}]};
+  a.data.sections.streams={status:"OK",data:[{clock_safe:true,covered:12,eligible:340}]};
+  a.data.live_analysis={
+    engine:{state:"ACTIVE",reason:"ANALYZED",regime:"RANGE",last_analysis_at:now,last_source_at:now,timeframe:"15m"},
+    pairs:{total:340,eligible:340,scanned:340,feed:12,feed_total:340,analyzed:1,evaluated:2},
+    rates:{market_events_total:100,evaluations_total:50},latency:{market_seconds:0.4,analysis_seconds:1.2},
+    pairs_detail:[{symbol:"ETHUSDT",stage:"DEEP",analyzed_at:now,as_of:now,decision:"LONG",strategy:"MOMENTUM",reasons:["CANDIDATE_VALIDATED"]}],
+    pipeline:[{stage:"SIGNAL",state:"PRESENT",last_at:now,detail:2},{stage:"RISK",state:"READY",last_at:now,detail:"READY"}],
+    connections:{binance_websocket:"CONNECTED",binance_rest:"CONNECTED",ws_reconnects:2,rest_last_success_at:now},
+    last_signal_at:now,last_signal_fresh:true,errors:[]};
+  a.context.render(a.data);
+  const content=e=>e.textContent+" "+e.children.map(content).join(" ");
+  assert.match(a.get("engine-state").textContent,/Analiz çalışıyor/);
+  assert.equal(a.get("engine-pair-analyzed").textContent,"1");
+  assert.match(content(a.get("engine-pairs")),/ETHUSDT/);
+  assert.match(content(a.get("engine-pairs")),/LONG/);
+  assert.match(content(a.get("engine-pipeline")),/Aday var/);
+  assert.match(content(a.get("engine-connections")),/Binance WebSocket/);
+  assert.match(content(a.get("engine-connections")),/Bağlı/);
+  a.data.live_analysis.pairs.analyzed=0;a.data.live_analysis.pairs_detail=[];a.data.live_analysis.engine.state="WAITING";
+  a.context.render(a.data);
+  assert.equal(a.get("engine-pair-analyzed").textContent,"0");
+  assert.doesNotMatch(content(a.get("engine-pairs")),/ETHUSDT/);
+  assert.match(a.get("engine-state").textContent,/bekliyor/);
+  a.context.stale("Disconnected");
+  assert.match(a.get("engine-state").textContent,/Veri bekleniyor/);
+  assert.match(content(a.get("engine-pairs")),/tarama kaydı henüz alınmadı/);
+});
+
+
+test("overview paginates all server-provided symbol rows without dropping the remainder",async()=>{
+  const a=await app();a.data.status="OK";
+  a.data.live_analysis={engine:{state:"SCANNING",timeframe:"15m"},pairs:{eligible:61,scanned:61},rates:{},latency:{},connections:{},pipeline:[],errors:[],pairs_detail:Array.from({length:61},(_,i)=>({symbol:`PAIR${String(i).padStart(3,"0")}USDT`,stage:"SCAN",analyzed_at:new Date().toISOString()}))};
+  a.context.render(a.data);
+  assert.match(a.get("ov-page-summary").textContent,/61 eşleşme · Sayfa 1\/3/);
+  assert.equal(a.get("engine-pairs").children[0].children[1].children.length,25);
+  a.get("ov-next").events.click();
+  assert.match(a.get("ov-page-summary").textContent,/Sayfa 2\/3/);
+  assert.equal(a.get("engine-pairs").children[0].children[1].children.length,25);
+  a.get("ov-next").events.click();
+  assert.equal(a.get("engine-pairs").children[0].children[1].children.length,11);
+  assert.equal(a.get("ov-next").disabled,true);
+});
+
+test("coverage cannot be inferred from symbol counts if the stream clock is not proven",async()=>{
+  const a=await app();a.data.status="OK";
+  a.data.sections.universe={status:"OK",data:[{eligible:100}]};
+  a.data.sections.streams={status:"DEGRADED",data:[{covered:100,eligible:100,clock_safe:false}]};
+  a.data.live_analysis={engine:{state:"WAITING"},pairs:{eligible:100,feed:100,feed_total:100,scanned:0},rates:{},latency:{},pairs_detail:[],connections:{},pipeline:[],errors:[]};
+  a.context.render(a.data);
+  assert.equal(a.get("ov-coverage").textContent,"—");
+  assert.equal(a.get("engine-pair-scan").textContent,"0");
+  assert.equal(a.get("engine-pair-analyzed").textContent,"—");
 });

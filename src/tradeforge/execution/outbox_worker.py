@@ -42,6 +42,17 @@ class OutboxWorker:
             self.manager.execute(identifier)
         return len(ids)
 
+    def drain(self, *, limit: int = 8) -> int:
+        """Bounded dispatch of committed intents; never bypass manager guards."""
+        if not 1 <= limit <= 100:
+            raise ValueError('INVALID_OUTBOX_DRAIN_LIMIT')
+        dispatched = 0
+        for _ in range(limit):
+            if not self.run_once():
+                break
+            dispatched += 1
+        return dispatched
+
     def run_once(self) -> bool:
         with self.db.transaction() as c:
             c.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": LOCK_ID})

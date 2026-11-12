@@ -442,6 +442,7 @@ def create_app(
             "app.js": "text/javascript",
             "binance_settings.js": "text/javascript",
             "app.css": "text/css",
+            "overview.css": "text/css",
             "chart.js": "text/javascript",
             "realtime.js": "text/javascript",
             "login.css": "text/css",

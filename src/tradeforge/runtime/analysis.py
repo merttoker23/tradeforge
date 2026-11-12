@@ -4,6 +4,7 @@ Only an armed setup is published. Candidate evidence is retained once; high
 frequency book/flow observations remain in the gateway's bounded memory.
 """
 
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable
 from copy import deepcopy
@@ -69,24 +70,71 @@ class AutonomousAnalysis:
     ) -> None:
         self.db, self.clock = db, clock
         self.momentum, self.reversal = MomentumAlpha(), ReversalAlpha()
+        # Monotonic process totals let the dashboard derive a real measurement
+        # window instead of inventing a rate from a single sample.
+        self.evaluation_total = 0
+        self.analysis_cycle_total = 0
+        self.last_analysis_at: str | None = None
+        # Latest per-symbol outcome, retaining unaffected pairs when a wakeup
+        # re-evaluates only the changed symbols. There is no analysis cycle:
+        # every eligible pair is re-evaluated continuously as evidence arrives.
+        self._summaries: dict[str, dict[str, object]] = {}
+        self._last_batch_symbol = ""
         self.state: dict[str, object] = {
             "candidate_count": 0,
             "reason_counts": {},
             "evaluated_count": 0,
             "analysis_symbols": 0,
+            "analyzed_symbols": 0,
+            "evaluation_total": 0,
+            "analysis_cycle_total": 0,
+            "last_analysis_at": None,
             "symbol_results": [],
+            "symbol_summaries": [],
             "execution_ready": False,
         }
 
-    def evaluate(self, inputs: tuple[MomentumInput, ...]) -> int:
+    def next_batch(self, ready: frozenset[str], *, limit: int = 24) -> frozenset[str]:
+        """Rotate over ready pairs so each batch fits the microstructure TTL."""
+        ordered = sorted(ready)
+        start = bisect_right(ordered, self._last_batch_symbol)
+        batch = (ordered[start:] + ordered[:start])[:limit]
+        if batch:
+            self._last_batch_symbol = batch[-1]
+        return frozenset(batch)
+
+    def evaluate(
+        self, inputs: tuple[MomentumInput, ...], *,
+        symbols: frozenset[str] | None = None,
+    ) -> int:
+        # Re-evaluation of one symbol may not mutate unrelated alpha state.
+        if symbols is not None:
+            inputs = tuple(
+                sample for sample in inputs if sample.instrument.symbol in symbols
+            )
         at = self.clock()
         momentum, reversal = deepcopy(self.momentum), deepcopy(self.reversal)
         discoveries = []
         counts: Counter[str] = Counter()
         evaluated = 0
         symbol_results = []
+        symbol_summaries: dict[str, dict[str, object]] = {}
         evidence = {}
         for sample in inputs:
+            symbol = sample.instrument.symbol
+            summary = symbol_summaries.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "analyzed_at": at.isoformat(),
+                    "as_of": sample.as_of.isoformat(),
+                    "decision": "NO_TRADE",
+                    "strategy": None,
+                    "strategies": ["MOMENTUM", "REVERSAL"]
+                    if isinstance(sample, ReversalInput) else ["MOMENTUM"],
+                    "reasons": [],
+                },
+            )
             for side in (Side.LONG, Side.SHORT):
                 results = [("MOMENTUM", momentum.evaluate(sample, side=side, now=at))]
                 if isinstance(sample, ReversalInput):
@@ -96,7 +144,7 @@ class AutonomousAnalysis:
                     candidate = result.candidate
                     symbol_results.append(
                         {
-                            "symbol": sample.instrument.symbol,
+                            "symbol": symbol,
                             "strategy": strategy,
                             "side": side.value,
                             "state": candidate.state.value if candidate else "NO_TRADE",
@@ -119,7 +167,15 @@ class AutonomousAnalysis:
                             except ValueError:
                                 code = NoTradeReason.OTHER_NO_TRADE.value
                             counts[code] += 1
+                            reasons = summary["reasons"]
+                            assert isinstance(reasons, list)
+                            if code not in reasons:
+                                reasons.append(code)
                         continue
+                    if summary["decision"] == "NO_TRADE":
+                        summary["decision"] = side.value
+                        summary["strategy"] = strategy
+                        summary["reasons"] = list(result.reason_codes)
                     discovery = Discovery(
                         candidate=candidate,
                         cluster="portfolio",
@@ -174,12 +230,25 @@ class AutonomousAnalysis:
                 )
                 count += 1
         self.momentum, self.reversal = momentum, reversal
+        if inputs:
+            self.last_analysis_at = at.isoformat()
+            self.analysis_cycle_total += 1
+        self.evaluation_total += evaluated
+        if symbols is None:
+            self._summaries = dict(symbol_summaries)
+        else:
+            self._summaries.update(symbol_summaries)
         self.state = {
             "candidate_count": count,
             "reason_counts": dict(counts),
             "evaluated_count": evaluated,
             "analysis_symbols": len(inputs),
+            "analyzed_symbols": len(symbol_summaries),
+            "evaluation_total": self.evaluation_total,
+            "analysis_cycle_total": self.analysis_cycle_total,
+            "last_analysis_at": self.last_analysis_at,
             "symbol_results": symbol_results[:64],
+            "symbol_summaries": list(self._summaries.values()),
             "execution_ready": False,
         }
         return count

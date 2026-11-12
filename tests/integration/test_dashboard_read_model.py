@@ -30,7 +30,7 @@ def test_actual_automation_is_separate_from_dashboard_authority_and_expires(migr
     at = datetime.now(UTC)
     save_runtime(
         migrated,
-        "execution_guardian",
+        "execution_core",
         at,
         at + timedelta(seconds=15),
         {
@@ -238,7 +238,7 @@ def test_real_universe_regime_context_and_durable_risk_projection(migrated):
     assert result["sections"]["account"]["data"][0]["freshness"] == "STALE"
 
 
-def test_missing_economics_and_unknown_regime_never_look_healthy(migrated):
+def test_missing_economics_degrades_health_with_fresh_unknown_regime(migrated):
     from tests.intelligence_fixtures import engine, frame
     from tradeforge.dashboard.read_model import ReadModel
     from tradeforge.intelligence.storage import save_snapshot
@@ -253,7 +253,8 @@ def test_missing_economics_and_unknown_regime_never_look_healthy(migrated):
         )
     result = ReadModel(migrated, clock=lambda: at).snapshot()
     assert result["sections"]["account"]["status"] == "UNKNOWN"
-    assert result["sections"]["regime"]["status"] == "UNKNOWN"
+    assert result["sections"]["regime"]["status"] == "OK"
+    assert result["sections"]["regime"]["data"][0]["label"] == "UNKNOWN"
     assert result["status"] == "DEGRADED"
 
 
@@ -437,3 +438,167 @@ def test_history_progress_projection_keeps_bounded_recovery_evidence(migrated):
     assert quant["history_current_members"] == 410
     assert quant["history_current_coverage"] == 0.793
     assert "DO_NOT_PROJECT_HISTORY_SENTINEL" not in canonical(result)
+
+
+def test_live_analysis_never_turns_feed_coverage_into_analyzed_pairs(migrated):
+    from tradeforge.dashboard.read_model import ReadModel
+    from tradeforge.runtime.storage import save_runtime
+
+    at = datetime.now(UTC)
+    save_runtime(
+        migrated,
+        "market_gateway",
+        at,
+        at + timedelta(seconds=15),
+        {
+            "eligible": 10,
+            "covered": 7,
+            "measured": True,
+            "clock_safe": True,
+            "coverage_deadlines": [
+                (at + timedelta(seconds=10)).isoformat()
+                for _ in range(7)
+            ],
+            "source_at": (at - timedelta(seconds=1)).isoformat(),
+            "websocket_state": "CONNECTED",
+            "received_events": 100,
+            "accepted_events": 90,
+            "socket_reconnects": 2,
+            "socket_failures": 1,
+            "quote_failures": 0,
+            "quote_last_reason": "OK",
+            "quote_last_success_at": (at - timedelta(seconds=1)).isoformat(),
+            "rest_state": "CONNECTED",
+            "cycle_failures": {"CANONICAL": 1},
+            "last_cycle_error": "MARKET_REST_UNAVAILABLE",
+            "last_cycle_error_at": at.isoformat(),
+            "last_cycle_error_stage": "CANONICAL",
+        },
+    )
+    live = ReadModel(migrated, clock=lambda: at).snapshot()["live_analysis"]
+    assert live["pairs"]["feed"] == 7
+    assert live["pairs"]["analyzed"] == 0
+    assert live["pairs_detail"] == []
+    assert live["engine"]["state"] == "DELAYED"
+    assert live["connections"]["binance_websocket"] == "CONNECTED"
+    assert live["connections"]["binance_rest"] == "CONNECTED"
+    assert live["connections"]["ws_reconnects"] == 2
+    assert live["connections"]["worker_errors"] == {"CANONICAL": 1}
+    assert live["errors"][0]["source"] == "market_gateway"
+    assert live["errors"][0]["code"] == "MARKET_REST_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("worker_reason", "ready", "source_age", "heartbeat_ttl", "expected"),
+    [
+        ("WAITING_CLOSED_BAR", True, 300, 15, ("ACTIVE", "WAITING_CLOSED_BAR")),
+        ("ANALYZED", True, 300, 0, ("DELAYED", "ANALYSIS_WORKER_LAG")),
+        ("ANALYZED", True, 1351, 15, ("DELAYED", "ANALYSIS_SOURCE_LAG")),
+        ("WAITING_HISTORY_SWEEP", False, None, 15, ("WAITING", "WAITING_HISTORY_SWEEP")),
+        ("WAITING_HISTORY_SWEEP", False, 1351, 15, ("DELAYED", "WAITING_HISTORY_SWEEP")),
+    ],
+)
+def test_live_analysis_distinguishes_closed_bar_wait_from_stale_worker_or_source(
+    worker_reason, ready, source_age, heartbeat_ttl, expected,
+):
+    from tradeforge.dashboard.read_model import refresh_freshness
+
+    at = datetime(2026, 11, 13, tzinfo=UTC)
+    worker = {
+        "service": "quant_core",
+        "healthy": True,
+        "freshness": "OK",
+        "as_of": at.isoformat(),
+        "fresh_until": (at + timedelta(seconds=heartbeat_ttl)).isoformat(),
+        "analysis_ready": ready,
+        "analysis_timeframe": "15m",
+        "reason": worker_reason,
+        "last_analysis_at": (at - timedelta(seconds=90)).isoformat() if ready else None,
+        "last_source_at": (at - timedelta(seconds=source_age)).isoformat()
+        if source_age is not None else None,
+    }
+
+    snapshot = refresh_freshness({"sections": {"workers": {"data": [worker]}}}, at)
+    engine = snapshot["live_analysis"]["engine"]
+    assert (engine["state"], engine["reason"]) == expected
+
+
+def test_live_analysis_projects_real_engine_totals_and_evaluated_pairs(migrated):
+    from tradeforge.dashboard.read_model import ReadModel
+    from tradeforge.runtime.storage import save_runtime
+
+    at = datetime.now(UTC)
+    save_runtime(
+        migrated,
+        "market_gateway",
+        at,
+        at + timedelta(seconds=15),
+        {
+            "eligible": 10,
+            "covered": 10,
+            "measured": True,
+            "clock_safe": True,
+            "coverage_deadlines": [
+                (at + timedelta(seconds=10)).isoformat()
+                for _ in range(10)
+            ],
+            "source_at": (at - timedelta(seconds=1)).isoformat(),
+            "websocket_state": "CONNECTED",
+            "received_events": 500,
+            "accepted_events": 480,
+            "quote_failures": 0,
+            "quote_last_reason": "OK",
+            "quote_last_success_at": (at - timedelta(seconds=1)).isoformat(),
+            "rest_state": "CONNECTED",
+        },
+    )
+    summaries = [
+        {
+            "symbol": "ETHUSDT",
+            "analyzed_at": at.isoformat(),
+            "as_of": (at - timedelta(seconds=1)).isoformat(),
+            "decision": "LONG",
+            "strategy": "MOMENTUM",
+            "reasons": ["CANDIDATE_VALIDATED"],
+        },
+        {
+            "symbol": "BTCUSDT",
+            "analyzed_at": at.isoformat(),
+            "as_of": (at - timedelta(seconds=1)).isoformat(),
+            "decision": "NO_TRADE",
+            "strategy": "REVERSAL",
+            "reasons": ["SPREAD_GATE"],
+        },
+    ]
+    save_runtime(
+        migrated,
+        "quant_core",
+        at,
+        at + timedelta(seconds=15),
+        {
+            "healthy": True,
+            "analysis_ready": True,
+            "evaluated_count": 4,
+            "analysis_symbols": 2,
+            "analyzed_symbols": 2,
+            "evaluation_total": 40,
+            "analysis_cycle_total": 10,
+            "last_analysis_at": at.isoformat(),
+            "last_analysis_source_at": (at - timedelta(seconds=1)).isoformat(),
+            "last_success_at": at.isoformat(),
+            "last_evaluation_at": at.isoformat(),
+            "symbol_summaries": summaries,
+        },
+    )
+    live = ReadModel(migrated, clock=lambda: at).snapshot()["live_analysis"]
+    assert live["engine"]["state"] == "ACTIVE"
+    assert live["pairs"]["analyzed"] == 2
+    assert live["pairs"]["evaluated"] == 4
+    assert {row["symbol"] for row in live["pairs_detail"]} == {
+        "ETHUSDT",
+        "BTCUSDT",
+    }
+    assert live["rates"]["market_events_total"] == 500
+    assert live["rates"]["evaluations_total"] == 40
+    assert live["latency"]["market_seconds"] == 1.0
+    assert live["latency"]["analysis_seconds"] == 1.0

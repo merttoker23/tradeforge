@@ -10,7 +10,7 @@ def test_demo_diagnostic_running_does_not_claim_execution_progress():
     snapshot = {
         "status": "DEGRADED",
         "sections": {
-            "demo": {"status": "OK", "data": [{"guardian": "RUNNING", "freshness": "OK"}]}
+            "demo": {"status": "OK", "data": [{"execution_engine": "RUNNING", "freshness": "OK"}]}
         },
     }
     state = refresh_freshness(snapshot, now)
@@ -27,7 +27,7 @@ def test_dispatch_readiness_expires_independently_of_diagnostics():
                 "status": "OK",
                 "data": [
                     {
-                        "service": "execution_guardian",
+                        "service": "execution_core",
                         "freshness": "OK",
                         "fresh_until": (now + timedelta(seconds=15)).isoformat(),
                         "execution_ready": True,

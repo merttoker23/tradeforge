@@ -22,7 +22,7 @@ from tradeforge.dashboard.auth import Authenticator
 from tradeforge.dashboard.control import CommandQueue
 from tradeforge.dashboard.demo_operator import attach_demo_operator
 from tradeforge.dashboard.local_terminal import LocalQuoteFeed, TerminalReadModel
-from tradeforge.runtime.config import local_database
+from tradeforge.runtime.config import local_database, local_token_file
 from tradeforge.runtime.secrets import read_secret
 
 
@@ -117,7 +117,10 @@ def select_binance_master(inline: str | None, private_file: Path | None) -> str 
     if inline is not None and private_file is not None:
         raise ValueError("BINANCE_MASTER_AMBIGUOUS")
     if private_file is not None:
-        master = read_secret(private_file, maximum=4096)
+        master = (
+            local_token_file(private_file) if os.name == "nt"
+            else read_secret(private_file, maximum=4096)
+        )
         if len(master) < 32:
             raise ValueError("BINANCE_ENCRYPTION_SECRET_INVALID")
         return master

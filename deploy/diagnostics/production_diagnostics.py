@@ -22,13 +22,12 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/", "LANG": "C.UTF-8", "LC_ALL": "C.UTF
 SERVICES = (
     "market_gateway",
     "quant_core",
-    "execution_guardian",
     "dashboard",
     "postgres",
     "caddy",
 )
-APPLICATIONS = ("market_gateway", "quant_core", "execution_guardian", "dashboard")
-PORTS = {"market_gateway": 8101, "quant_core": 8102, "execution_guardian": 8103}
+APPLICATIONS = ("market_gateway", "quant_core", "dashboard")
+PORTS = {"market_gateway": 8101, "quant_core": 8102}
 UNKNOWN = "UNKNOWN"
 CAP = 96_000
 
@@ -489,7 +488,6 @@ PROBE_GATEWAY = "PORT=8101\n" + PROBE_COMMON + PROBE_ANALYSIS + "\nprint(json.du
 PROBES = {
     "market_gateway": PROBE_GATEWAY,
     "quant_core": "PORT=8102\n" + PROBE_COMMON + "\nprint(json.dumps(result))\n",
-    "execution_guardian": "PORT=8103\n" + PROBE_COMMON + "\nprint(json.dumps(result))\n",
 }
 
 QUERIES = {
@@ -502,7 +500,7 @@ QUERIES = {
           'expires_at',expires_at,'age_seconds',extract(epoch FROM now()-observed_at),
           'fresh',observed_at<=now() AND expires_at>now(),'data',payload) AS value
         FROM public.runtime_observations
-        WHERE service IN ('market_gateway','quant_core','execution_guardian') ORDER BY service
+        WHERE service IN ('market_gateway','quant_core','execution_core') ORDER BY service
     """,
     "pipeline_72h": """
         SELECT jsonb_build_object('stage',stage,'count',n,'first_at',first_at,'last_at',last_at)

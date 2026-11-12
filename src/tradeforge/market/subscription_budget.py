@@ -3,7 +3,7 @@
 from collections import deque
 from dataclasses import dataclass
 
-from tradeforge.market.streams import GLOBAL_STREAMS, MarketEvent, StreamSpec
+from tradeforge.market.streams import GLOBAL_STREAMS, PARTIAL_DEPTH, MarketEvent, StreamSpec
 
 
 @dataclass(frozen=True)
@@ -22,16 +22,18 @@ def plan_subscriptions(
     protected: tuple[str, ...] = (),
     max_sockets: int = 8,
     streams_per_socket: int = 1024,
+    partial_depth: bool = False,
 ) -> SubscriptionPlan:
     if not 1 <= max_sockets <= 32 or not 2 <= streams_per_socket <= 1024:
         raise ValueError("INVALID_SUBSCRIPTION_BUDGET")
     if not eligible or not set(watched + deep + protected) <= eligible:
         raise ValueError("INVALID_SUBSCRIPTION_UNIVERSE")
     groups: list[list[StreamSpec]] = []
+    added: set[StreamSpec] = set()
     omitted = []
 
     def add(spec: StreamSpec, required: bool) -> None:
-        if any(spec in group for group in groups):
+        if spec in added:
             return
         for group in groups:
             if (
@@ -40,9 +42,11 @@ def plan_subscriptions(
                 and (group[0].name in GLOBAL_STREAMS) == (spec.name in GLOBAL_STREAMS)
             ):
                 group.append(spec)
+                added.add(spec)
                 return
         if len(groups) < max_sockets:
             groups.append([spec])
+            added.add(spec)
         elif required:
             raise ValueError("PROTECTED_MARKET_BUDGET_EXCEEDED")
         else:
@@ -54,13 +58,21 @@ def plan_subscriptions(
     # add higher-frequency or depth evidence on top of this mandatory sweep.
     for symbol in sorted(eligible):
         add(StreamSpec(f"{symbol.lower()}@kline_15m"), True)
+    full_book = ("bookTicker", "depth@100ms", "aggTrade")
+    strategy_book = (PARTIAL_DEPTH, "aggTrade") if partial_depth else full_book
+    protected_set = frozenset(protected)
     for symbols, required, suffixes in (
-        (protected, True, ("bookTicker", "depth@100ms", "aggTrade")),
-        (deep, False, ("bookTicker", "depth@100ms", "aggTrade")),
+        (protected, True, full_book),
+        # The deep tier reads the closed 15m features and the 5m setup bars.
+        # It does not read the 1m series, so it must not depend on a
+        # one-minute candle stream that is only kept for display.
+        (deep, False, (*strategy_book, "kline_5m")),
         (watched, False, ("bookTicker", "kline_1m", "kline_5m")),
     ):
         for symbol in dict.fromkeys(symbols):
             for suffix in suffixes:
+                if suffix == PARTIAL_DEPTH and symbol in protected_set:
+                    continue
                 add(StreamSpec(f"{symbol.lower()}@{suffix}"), required)
     return SubscriptionPlan(
         eligible, tuple(tuple(g) for g in groups), tuple(omitted), frozenset(protected)
@@ -129,6 +141,16 @@ class MarketQueue:
                 self.byte_size -= item.size
                 return item
         raise IndexError("EMPTY_MARKET_QUEUE")
+
+    def discard_stream(self, stream: StreamSpec) -> None:
+        for priority, queue in enumerate(self._queues):
+            retained = deque()
+            for item in queue:
+                if item.event.stream == stream:
+                    self.byte_size -= item.size
+                else:
+                    retained.append(item)
+            self._queues[priority] = retained
 
     def clear(self) -> None:
         for queue in self._queues:

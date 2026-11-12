@@ -8,34 +8,14 @@ from aiohttp import ClientSession, web
 from tests.integration.test_protection_recovery import prepared
 
 
-def test_health_requires_recovery_and_reports_unprotected_duration(seeded):
-    from apps.execution_guardian.runtime import create_app
-    from tests.integration.test_execution_orders import manager
-
-    db, intent, client, recovery, at = prepared(seeded)
+def test_protection_requires_recovery_and_reports_unprotected_duration(seeded):
+    _, _, client, recovery, _ = prepared(seeded)
     client.fail_stop = True
     client.close_partial = True
     recovery.reconcile()
-
-    async def run():
-        m = manager(db, client, None, at)
-        runner = web.AppRunner(create_app(m, lambda: True, recovery), access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        try:
-            async with ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/readiness") as response:
-                    assert response.status == 503
-                    body = await response.json()
-                    assert body["phase"] == "PHASE_15"
-                    assert body["protection"]["unprotected"][0]["seconds"] >= 0
-                    assert body["orders_enabled"] is False
-        finally:
-            await runner.cleanup()
-
-    asyncio.run(run())
+    assert recovery.ready is False
+    health = recovery.health()
+    assert health["unprotected"][0]["seconds"] >= 0
 
 
 def test_private_stream_account_and_algo_events_reconcile_before_ready(seeded):

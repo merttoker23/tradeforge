@@ -30,12 +30,8 @@ class FakeNode {
 }
 function healthRow(value){const n=new FakeNode();n.className='health-row';n.append(new FakeNode('span',value));return n;}
 const ids={};
-for(const name of ['runtime-mode','services','data-health','guardian-summary',
-  'execution-status','execution-note','analysis-results','evaluation-note'])ids[name]=new FakeNode();
+for(const name of ['runtime-mode','services','data-health','engine-preview','engine-pair-note'])ids[name]=new FakeNode();
 ids['runtime-mode'].textContent='Doğrulanamadı';
-ids['services'].append(healthRow('execution_guardian'),healthRow('quant_core'));
-ids['data-health'].append(healthRow('guardian'),healthRow('regime'));
-const keyValue=new FakeNode();keyValue.append(new FakeNode('span','Emir koruyucu'),ids['guardian-summary']);
 const badge=new FakeNode('span','LIVE=false');
 const handlers={};
 const model={market_environment:'testnet',sections:{workers:{data:[{
@@ -54,24 +50,19 @@ const context=vm.createContext({
   queueMicrotask:fn=>fn(),
 });
 vm.runInContext(source,context);
-assert.equal(ids['runtime-mode'].textContent,'TESTNET · DEMO');
+assert.equal(ids['runtime-mode'].textContent,'TESTNET · EMİR PASİF');
 assert.equal(badge.removed,true);
-assert.deepEqual(ids['services'].querySelectorAll('.health-row').map(x=>x.children[0].textContent),['quant_core']);
-assert.deepEqual(ids['data-health'].querySelectorAll('.health-row').map(x=>x.children[0].textContent),['regime']);
-assert.match(ids['evaluation-note'].textContent,/derin izleme.*0/);
-assert.match(ids['evaluation-note'].textContent,/DISORDER/);
-let preview=ids['analysis-results'].querySelector('.tf-pretrade-preview');
+assert.match(ids['engine-pair-note'].textContent,/derin izleme.*0/);
+assert.match(ids['engine-pair-note'].textContent,/DISORDER/);
+let preview=ids['engine-preview'].querySelector('.tf-pretrade-preview');
 assert.ok(preview);
 assert.match(preview.children[0].textContent,/Strateji değerlendirmesi değil/);
 const table=preview.children[1];
 assert.equal(table.tag,'table');
 assert.equal(table.children[1].children.length,1); // stale ETH suppressed
 assert.equal(table.children[1].children[0].children[0].textContent,'BTCUSDT');
-handlers['tradeforge:demo-account']({detail:{environment:'testnet',status:'OK',manual_orders_available:true}});
-assert.equal(ids['execution-status'].textContent,'Manuel Testnet emir formu açık');
-assert.equal(ids['guardian-summary'].textContent,'Form açık');
-assert.equal(keyValue.children[0].textContent,'Testnet manuel emir');
-handlers['tradeforge:demo-unavailable']();
-assert.equal(ids['runtime-mode'].textContent,'TESTNET · DEMO'); // persisted environment, not execution gate
-assert.equal(ids['execution-status'].textContent,'Testnet emir bağlantısı doğrulanıyor');
-console.log('testnet UI assertions passed');
+assert.ok(!source.includes('tradeforge:demo-account'));
+assert.ok(!source.includes('manual_orders_available'));
+assert.ok(!source.includes('fetch('));
+assert.ok(!source.includes('POST'));
+console.log('autonomous terminal display assertions passed');

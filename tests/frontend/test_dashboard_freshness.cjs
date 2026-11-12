@@ -72,28 +72,33 @@ test("expired discovery cannot retain coverage", () => {
   assert.equal(data.sections.universe.data[0].stream_coverage, null);
 });
 
-test("expired demo diagnostics cannot retain a successful connection summary", () => {
+test("expired read-only demo diagnostics cannot imply order permission", () => {
   const data = snapshot();
-  data.demo_readiness = { status: "OK", orders_enabled: false, reason_codes: [] };
-  data.service_health.execution_guardian = "OK";
-  data.sections.demo = { status: "OK", data: [{ guardian: "RUNNING", freshness: "OK", fresh_until: timestamp(-1) }] };
+  data.demo_readiness = {status:"OK",orders_enabled:true,reason_codes:[]};
+  data.sections.demo = {status:"OK",data:[{freshness:"OK",fresh_until:timestamp(-1)}]};
   age(data);
-  assert.equal(data.demo_readiness.status, "STALE");
-  assert.equal(data.demo_readiness.orders_enabled, false);
-  assert.equal(data.demo_readiness.reason_codes.length, 1);
-  assert.equal(data.demo_readiness.reason_codes[0], "DEMO_PREFLIGHT_STALE");
-  assert.equal(data.service_health.execution_guardian, "NOT_READY");
-  assert.equal(data.sections.demo.data[0].guardian, "UNKNOWN");
+  assert.equal(data.demo_readiness.status,"STALE");
+  assert.equal(data.demo_readiness.orders_enabled,false);
+  assert.equal([...data.demo_readiness.reason_codes].join(","),"DEMO_PREFLIGHT_STALE");
 });
 
-test("lost dashboard connection clears derived demo health before source expiry", () => {
+test("stale execution telemetry disables derived automated order readiness", () => {
   const data = snapshot();
-  data.status = "STALE";
-  data.demo_readiness = { status: "OK", orders_enabled: false, reason_codes: [] };
-  data.service_health.execution_guardian = "UNKNOWN";
-  data.sections.demo = { status: "STALE", data: [{ guardian: "RUNNING", freshness: "STALE", fresh_until: timestamp(20) }] };
+  data.sections.workers.data.push({service:"execution_core",freshness:"OK",fresh_until:timestamp(-1)});
+  data.execution_readiness = {ready:true,entries_enabled:true,reason:"READY",blockers:[]};
   age(data);
-  assert.equal(data.demo_readiness.status, "STALE");
-  assert.equal(data.service_health.execution_guardian, "NOT_READY");
-  assert.equal(data.sections.demo.data[0].guardian, "UNKNOWN");
+  assert.equal(data.service_health.execution_core,"STALE");
+  assert.equal(data.execution_readiness.ready,false);
+  assert.equal(data.execution_readiness.entries_enabled,false);
+  assert.equal([...data.execution_readiness.blockers].join(","),"DISPATCH_STALE");
+});
+
+test("stale dashboard connection cannot keep execution ready", () => {
+  const data = snapshot();
+  data.status="STALE";
+  data.sections.workers.data.push({service:"execution_core",freshness:"STALE",fresh_until:timestamp(20)});
+  data.execution_readiness={ready:true,entries_enabled:true,reason:"READY",blockers:[]};
+  age(data);
+  assert.equal(data.execution_readiness.ready,false);
+  assert.equal(data.execution_readiness.entries_enabled,false);
 });

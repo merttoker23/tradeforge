@@ -505,7 +505,7 @@ def test_canceled_aggregate_is_isolated_without_losing_other_fixed_counts(diagno
         if section == "runtime_current":
             rows = [
                 {
-                    "service": "execution_guardian",
+                    "service": "execution_core",
                     "data": {"blockers": ["BROAD_ANALYSIS_NOT_READY", SECRET]},
                 }
             ]

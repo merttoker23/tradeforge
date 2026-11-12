@@ -16,7 +16,7 @@ def save_runtime(
 ) -> None:
     utc(at)
     utc(deadline)
-    if service not in {"market_gateway", "quant_core", "execution_guardian"}:
+    if service not in {"market_gateway", "quant_core", "execution_core"}:
         raise ValueError("RUNTIME_SERVICE_INVALID")
     with db.transaction() as c:
         c.execute(
@@ -25,7 +25,7 @@ def save_runtime(
             VALUES (:service,:at,:deadline,CAST(:payload AS jsonb))
             ON CONFLICT(service) DO UPDATE SET observed_at=EXCLUDED.observed_at,
               expires_at=EXCLUDED.expires_at,payload=(
-                CASE WHEN EXCLUDED.service='execution_guardian'
+                CASE WHEN EXCLUDED.service='execution_core'
                   AND NOT (EXCLUDED.payload ? 'storage_ready')
                 THEN jsonb_strip_nulls(jsonb_build_object(
                   'storage_ready',runtime_observations.payload->'storage_ready',
@@ -33,7 +33,7 @@ def save_runtime(
                 )) ELSE '{}'::jsonb END
               ) || EXCLUDED.payload
             WHERE runtime_observations.observed_at<EXCLUDED.observed_at
-              OR (EXCLUDED.service='execution_guardian'
+              OR (EXCLUDED.service='execution_core'
                 AND runtime_observations.observed_at=EXCLUDED.observed_at
                 AND EXCLUDED.payload ? 'storage_ready'
                 AND EXCLUDED.payload->'storage_ready' IS DISTINCT FROM 'true'::jsonb)

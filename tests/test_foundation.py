@@ -12,7 +12,7 @@ from threading import Thread
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVICES = ("market_gateway", "quant_core", "execution_guardian", "dashboard")
+SERVICES = ("market_gateway", "quant_core", "dashboard")
 
 
 def invoke(
@@ -113,7 +113,7 @@ def test_invalid_listen_port_is_rejected(arg: str) -> None:
 
 def test_credential_environment_is_never_projected() -> None:
     result = invoke(
-        "execution_guardian", "--check", env={"BINANCE_API_KEY": "TEST_SECRET_SENTINEL"}
+        "quant_core", "--check", env={"BINANCE_API_KEY": "TEST_SECRET_SENTINEL"}
     )
     assert result.returncode == 0
     assert "TEST_SECRET_SENTINEL" not in result.stdout + result.stderr

@@ -18,7 +18,7 @@ async def project_demo(db: Database, client: BinanceTestnetClient) -> None:
     while True:
         started = time.monotonic()
         state = await asyncio.to_thread(preflight, client, terminal=True)
-        state["guardian"] = "RUNNING"
+        state["execution_engine"] = "RUNNING"
         state["orders_enabled"] = False  # Diagnostics never authorize orders.
         try:
             await asyncio.to_thread(publish, state)

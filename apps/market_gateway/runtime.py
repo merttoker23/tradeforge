@@ -21,7 +21,7 @@ from tradeforge.market.socket_manager import AiohttpConnector, pause
 from tradeforge.market.storage import save_view
 from tradeforge.market.universe_refresh import UniverseRefresher
 from tradeforge.persistence.db import Database
-from tradeforge.runtime.config import local_database
+from tradeforge.runtime.config import local_database, local_token_file
 from tradeforge.runtime.signals import shutdown_signals
 
 
@@ -146,13 +146,19 @@ async def serve(
     deep: tuple[str, ...] = (),
     host: str = "127.0.0.1",
     internal_token: str | None = None,
+    loopback: bool = False,
+    full_depth: bool = False,
+    depth_batch_size: int | None = None,
 ) -> None:
     from tradeforge.runtime.binance_environment import select_environment
 
     active = select_environment(database)
     if internal_token is not None:
         database.pin_environment(active.revision)
-    gateway = MarketGateway(ClockSync(), environment=active.name)
+    gateway = MarketGateway(
+        ClockSync(max_rtt=5.0, max_skew=3.0),
+        environment=active.name, full_depth=full_depth, depth_batch_size=depth_batch_size,
+    )
     refresher = UniverseRefresher(
         InstrumentRegistry(database),
         ExchangeInfoClient(
@@ -168,7 +174,9 @@ async def serve(
         gateway, database, require_admission=internal_token is not None
     )
     app = create_app(gateway, chart_demand=persistence.request_chart)
+    from tradeforge.runtime.event_handoff import MarketEventHub, add_market_events_route
     from tradeforge.runtime.market_link import add_loopback_memory_route, add_memory_route
+    market_events = MarketEventHub()
 
     if internal_token is None:
         # Standalone services share public market evidence over loopback only.
@@ -177,8 +185,11 @@ async def serve(
             raise ValueError("LOCAL_MARKET_HANDOFF_REQUIRES_LOOPBACK_8101")
         add_loopback_memory_route(app, gateway, persistence)
     else:
-        # The existing authenticated Compose/VPS handoff is unchanged.
-        add_memory_route(app, gateway, persistence, internal_token)
+        # The authenticated Compose/VPS handoff stays strict. A co-located
+        # local dashboard has no token file, so its verified loopback GET
+        # requests may share this route alongside the bearer calls.
+        add_memory_route(app, gateway, persistence, internal_token, loopback=loopback)
+    add_market_events_route(app, market_events, token=internal_token)
     runner = web.AppRunner(app, access_log=None)
     from tradeforge.runtime.surveillance import RuntimeSurveillance
 
@@ -186,16 +197,24 @@ async def serve(
 
     async def canonical_worker() -> None:
         while not stop.is_set():
-            await canonical_cycle(
-                gateway, database, recovery, require_admission=internal_token is not None
-            )
+            try:
+                await canonical_cycle(
+                    gateway, database, recovery, require_admission=internal_token is not None
+                )
+            except Exception as error:
+                # A timed-out public REST call or a short DB stall must not
+                # restart the process and drop every Binance socket with it.
+                gateway.record_cycle_error("CANONICAL", error)
             await pause(stop, 2)
 
     async def depth_worker() -> None:
         while not stop.is_set():
-            await depth_cycle(
-                gateway, database, recovery, require_admission=internal_token is not None
-            )
+            try:
+                await depth_cycle(
+                    gateway, database, recovery, require_admission=internal_token is not None
+                )
+            except Exception as error:
+                gateway.record_cycle_error("DEPTH", error)
             await pause(stop, 1)
 
     async def recovery_workers() -> None:
@@ -216,7 +235,16 @@ async def serve(
         # Fence existing sockets and RAM state; Compose restarts all clients on revision.
         while not stop.is_set():
             await asyncio.sleep(1)
-            current = await asyncio.to_thread(select_environment, database)
+            try:
+                current = await asyncio.to_thread(select_environment, database)
+            except Exception as error:
+                if str(error) == "BINANCE_ENVIRONMENT_RESTART_REQUIRED":
+                    stop.set()
+                    raise
+                # A transient database outage is not an environment switch.
+                # Keep the last verified environment and retry next second.
+                gateway.record_cycle_error("ENVIRONMENT", error)
+                continue
             if current.revision != active.revision:
                 gateway.update_universe(RegistryView(None, False, "ENVIRONMENT_CHANGED"))
                 stop.set()
@@ -257,6 +285,7 @@ async def serve(
                         watched=watched,
                         deep=deep,
                         selection=surveillance.selection,
+                        consume=market_events.publish,
                     )
                 )
                 try:
@@ -295,6 +324,14 @@ def main() -> int:
     )
     parser.add_argument("--port", type=int, default=8101)
     parser.add_argument(
+        "--full-depth", action="store_true",
+        help="Subscribe every eligible pair to the strategy evidence streams",
+    )
+    parser.add_argument(
+        "--depth-batch-size", type=int,
+        help="Rotate strategy subscriptions in batches while scanning the entire universe",
+    )
+    parser.add_argument(
         "--watch",
         action="append",
         default=[],
@@ -307,6 +344,11 @@ def main() -> int:
         default=[],
         metavar="SYMBOL",
         help="Explicit depth/aggTrade plus native bars; repeat per symbol",
+    )
+    parser.add_argument(
+        "--gateway-token-file",
+        type=Path,
+        help="Internal handoff token; keeps admission gating across services",
     )
     args = parser.parse_args()
     try:
@@ -326,11 +368,18 @@ def main() -> int:
             raise ValueError("CANONICAL_SYMBOL_BUDGET")
         if settings.mode.value != "paper" or settings.live or not 0 <= args.port <= 65535:
             raise ValueError("GATEWAY_PAPER_LOCAL_REQUIRED")
+        token = local_token_file(args.gateway_token_file) if args.gateway_token_file else None
         database = local_database(args.database_url_file)
     except Exception:
         parser.error("GATEWAY_LOCAL_CONFIG_INVALID")
     try:
-        asyncio.run(serve(database, args.port, watched=tuple(args.watch), deep=tuple(args.deep)))
+        asyncio.run(
+            serve(
+                database, args.port, watched=tuple(args.watch), deep=tuple(args.deep),
+                internal_token=token, loopback=True, full_depth=args.full_depth,
+                depth_batch_size=args.depth_batch_size,
+            )
+        )
     except KeyboardInterrupt:
         pass
     except Exception:

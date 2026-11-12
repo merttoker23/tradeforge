@@ -83,8 +83,49 @@ def test_invalid_global_input_rejected(changes):
 
 
 def test_source_staleness_duplicate_keys_and_mixed_market():
+    # A market array carries one row per symbol. A symbol that has not traded
+    # keeps its own old timestamp; that row is excluded and the valid peers
+    # of the same frame must survive.
+    peers = decode(
+        [ticker("BTCUSDT"), ticker("ETHUSDT", E=MS - 60000)],
+        eligible=frozenset({"BTCUSDT", "ETHUSDT"}),
+    )
+    assert [event.symbol for event in peers] == ["BTCUSDT"]
+    # A single-symbol stream with a stale event is a broken stream.
     with pytest.raises(ValueError):
-        decode([ticker(E=MS - 60000)], eligible=frozenset({"BTCUSDT"}))
+        decode(
+            [
+                {
+                    "e": "kline",
+                    "E": MS - 60000,
+                    "s": "BTCUSDT",
+                    "k": {
+                        "t": MS - 900000,
+                        "T": MS - 1,
+                        "s": "BTCUSDT",
+                        "i": "15m",
+                        "o": "100",
+                        "c": "101",
+                        "h": "102",
+                        "l": "99",
+                        "v": "10",
+                        "x": True,
+                    },
+                }
+            ],
+            stream="btcusdt@kline_15m",
+            eligible=frozenset({"BTCUSDT"}),
+        )
+    # A clock that is trusted within a skew may not reject every event of
+    # that stream. The tolerance must match the declared clock policy.
+    future = decode(
+        [ticker(E=MS + 2000)], eligible=frozenset({"BTCUSDT"}), max_future=3
+    )
+    assert len(future) == 1
+    with pytest.raises(ValueError):
+        decode([ticker(E=MS + 2000)], eligible=frozenset({"BTCUSDT"}))
+    with pytest.raises(ValueError):
+        decode([ticker(E=MS + 5000)], eligible=frozenset({"BTCUSDT"}), max_future=3)
     with pytest.raises(ValueError):
         decode_events(
             '{"stream":"!ticker@arr","stream":"x","data":[]}',

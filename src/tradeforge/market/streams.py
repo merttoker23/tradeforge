@@ -14,8 +14,9 @@ from tradeforge.market.exchange_info import FetchError, decode_payload, millisec
 
 Route = Literal["public", "market"]
 GLOBAL_STREAMS = ("!ticker@arr", "!markPrice@arr@1s")
+PARTIAL_DEPTH = "depth20@500ms"
 _STREAM = re.compile(
-    r"[a-z0-9]+usdt@(?:bookTicker|depth(?:@100ms|@500ms)?|aggTrade|kline_(?:1m|5m|15m))"
+    r"[a-z0-9]+usdt@(?:bookTicker|depth(?:@100ms|@500ms|20@500ms)?|aggTrade|kline_(?:1m|5m|15m))"
 )
 
 
@@ -34,6 +35,10 @@ class StreamSpec:
     @property
     def symbol(self) -> str | None:
         return None if self.name.startswith("!") else self.name.split("@")[0].upper()
+
+    @property
+    def partial_depth(self) -> bool:
+        return self.name.endswith("@" + PARTIAL_DEPTH)
 
 
 @dataclass(frozen=True)
@@ -80,20 +85,42 @@ def decode_events(
     sequence: int,
     eligible: frozenset[str],
     max_age: float = 15,
+    max_future: float = 0,
 ) -> tuple[MarketEvent, ...]:
     """Eligible rows validate before publication; documented CM rows are excluded.
 
     The fstream route establishes USD-M provenance. Explicit market discriminators
     must agree. `st=1` denotes USD-M in the shared market payload, `st=2` COIN-M.
     Unknown symbols are filtered against the current authoritative registry.
+
+    `max_future` bounds how far an exchange timestamp may appear ahead of the
+    local clock. It must match the clock policy the caller trusts: a clock that
+    is allowed a skew may not reject every event of that stream.
     """
-    utc(received_at)
-    _counter(generation)
-    _counter(sequence)
     try:
         payload = decode_payload(message.encode())
     except FetchError:
         raise ValueError("INVALID_MARKET_JSON") from None
+    return decode_frame(
+        payload, route=route, received_at=received_at, generation=generation, sequence=sequence,
+        eligible=eligible, max_age=max_age, max_future=max_future,
+    )
+
+
+def decode_frame(
+    payload: object,
+    *,
+    route: Route,
+    received_at: datetime,
+    generation: int,
+    sequence: int,
+    eligible: frozenset[str],
+    max_age: float = 15,
+    max_future: float = 0,
+) -> tuple[MarketEvent, ...]:
+    utc(received_at)
+    _counter(generation)
+    _counter(sequence)
     if not isinstance(payload, dict) or not isinstance(payload.get("stream"), str):
         raise ValueError("COMBINED_MARKET_FRAME_REQUIRED")
     spec = StreamSpec(payload["stream"])
@@ -124,7 +151,15 @@ def decode_events(
         if spec.symbol is not None and spec.symbol != symbol:
             raise ValueError("STREAM_SYMBOL_MISMATCH")
         source = milliseconds(row.get("E"))
-        if not 0 <= (received_at - source).total_seconds() <= max_age:
+        age = (received_at - source).total_seconds()
+        if not -max_future <= age <= max_age:
+            if spec.symbol is None and age > max_age:
+                # A market array carries one row per symbol. A symbol that
+                # has not traded keeps its own old timestamp; that row is
+                # excluded, but the valid peers of the same frame must
+                # survive. A future timestamp is a broken clock and fails
+                # the whole frame.
+                continue
             raise ValueError("STALE_OR_FUTURE_MARKET_EVENT")
         values: dict[str, Decimal] = {}
         exchange_sequence = None

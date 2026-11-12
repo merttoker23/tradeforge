@@ -81,6 +81,7 @@ class OfflineBinanceTransport:
         self.lookup_missing = False
         self.reject_entry = False
         self.trade_rows = []
+        self.exit_rows = []
 
     @property
     def milliseconds(self):
@@ -99,7 +100,7 @@ class OfflineBinanceTransport:
         ]
 
     def position(self):
-        if not self.filled:
+        if not self.filled or self.exit_rows:
             return []
         return [
             {
@@ -138,13 +139,34 @@ class OfflineBinanceTransport:
                 "symbol": "ETHUSDT",
                 "orderId": 4201,
                 "id": trade_id,
+                "side": self.entry["side"],
                 "qty": str(quantity),
                 "price": str(self.ask),
+                "realizedPnl": "0",
                 "commission": "0.001",
                 "commissionAsset": "USDT",
+                "maker": False,
                 "time": self.milliseconds,
             }
         )
+
+    def hit_take_profit(self):
+        target = next(
+            algo for algo in self.algos.values() if algo["orderType"] == "TAKE_PROFIT_MARKET"
+        )
+        assert target["algoStatus"] == "NEW" and target["side"] == "SELL"
+        assert target["closePosition"] and self.filled > 0
+        target.update(algoStatus="FINISHED", actualOrderId="4202")
+        price = D(target["triggerPrice"])
+        gross = (price - self.ask) * self.filled
+        assert gross > 0
+        self.exit_rows.append({
+            "symbol": "ETHUSDT", "orderId": 4202, "id": 703, "side": "SELL",
+            "qty": str(self.filled), "price": str(price), "realizedPnl": str(gross),
+            "commission": "0.001", "commissionAsset": "USDT", "maker": False,
+            "time": self.milliseconds,
+        })
+        return gross
 
     def __call__(self, method, path, encoded, headers):
         params = {key: values[0] for key, values in parse_qs(encoded).items()}
@@ -195,7 +217,7 @@ class OfflineBinanceTransport:
         elif (method, path) == ("GET", "/fapi/v1/openOrders"):
             body = []
         elif (method, path) == ("GET", "/fapi/v1/openAlgoOrders"):
-            body = list(self.algos.values())
+            body = [algo for algo in self.algos.values() if algo["algoStatus"] == "NEW"]
         elif (method, path) == ("GET", "/fapi/v3/positionRisk"):
             body = self.position()
         elif (method, path) == ("GET", "/fapi/v1/ticker/bookTicker"):
@@ -236,8 +258,13 @@ class OfflineBinanceTransport:
                 assert params["origClientOrderId"] == self.entry["newClientOrderId"]
                 body = self.report()
         elif (method, path) == ("GET", "/fapi/v1/userTrades"):
-            assert params["orderId"] == "4201" and params["symbol"] == "ETHUSDT"
-            body = list(self.trade_rows)
+            assert params["symbol"] == "ETHUSDT"
+            if "orderId" in params:
+                assert params["orderId"] == "4201"
+                body = list(self.trade_rows)
+            else:
+                assert "startTime" in params and "endTime" in params
+                body = self.trade_rows + self.exit_rows
         elif (method, path) == ("GET", "/fapi/v1/algoOrder"):
             body = self.algos.get(params["clientAlgoId"])
             if body is None:
@@ -261,6 +288,10 @@ class OfflineBinanceTransport:
                 "triggerPrice": params["triggerPrice"],
             }
             self.algos[key] = body
+        elif (method, path) == ("DELETE", "/fapi/v1/algoOrder"):
+            body = self.algos[params["clientAlgoId"]]
+            assert body["algoStatus"] == "NEW"
+            body["algoStatus"] = "CANCELED"
         else:
             raise AssertionError(f"Unexpected OFFLINE wire request: {method} {path}")
         return Response(status, {}, json.dumps(body).encode())
@@ -475,6 +506,25 @@ def test_offline_real_alpha_trial_publishes_then_fills_and_protects_once(migrate
         assert c.scalar(text("SELECT protected_qty=qty FROM positions"))
         assert c.scalar(text("SELECT count(*) FROM protective_orders WHERE status='NEW'")) == 2
     assert pipeline.events("edge.outcome.v1") == []
+
+    from tradeforge.runtime.settlement import settle_closed_results
+
+    pipeline.clock.at += timedelta(seconds=1)
+    gross = pipeline.transport.hit_take_profit()
+    recovered.reconcile()
+    assert recovered.ready, recovered.health()
+    settle_closed_results(migrated, pipeline.client)
+    settle_closed_results(migrated, pipeline.client)
+    with migrated.transaction() as c:
+        assert c.scalar(text("SELECT qty=0 AND protected_qty=0 FROM positions"))
+        protectors = dict(c.execute(text(
+            "SELECT split_part(client_order_id,'_',1),status FROM protective_orders"
+        )).all())
+        assert protectors == {"sl": "CANCELED", "tp": "FINISHED"}
+    results = pipeline.events("runtime.closed_result.v1")
+    assert len(results) == 1 and D(results[0]["pnl"]) == gross - D("0.003")
+    assert len(pipeline.events("edge.outcome.v1")) == 1
+    assert len(pipeline.transport.entry_posts) == 1
 
 
 def test_offline_trial_off_keeps_insufficient_history_without_publication(migrated, monkeypatch):

@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from tradeforge.runtime.storage import save_runtime
 
 
-def test_guardian_requires_current_measured_quant_analysis(migrated):
-    from apps.execution_guardian.runtime import analysis_ready
+def test_embedded_execution_requires_current_measured_quant_analysis(migrated):
+    from tradeforge.runtime.auto_execution import analysis_ready
 
     at = datetime.now(UTC)
     assert not analysis_ready(migrated, at)

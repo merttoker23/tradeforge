@@ -41,7 +41,7 @@ SELECT jsonb_build_object('section','runtime_current','row',value) FROM (
           'expires_at',expires_at,'age_seconds',extract(epoch FROM now()-observed_at),
           'fresh',observed_at<=now() AND expires_at>now(),'data',payload) AS value
         FROM public.runtime_observations
-        WHERE service IN ('market_gateway','quant_core','execution_guardian') ORDER BY service
+        WHERE service IN ('market_gateway','quant_core','execution_core') ORDER BY service
     ) fixed_rows;
 SELECT 'TF_DIAGNOSTICS_SECTION:pipeline_72h';
 SELECT jsonb_build_object('section','pipeline_72h','row',value) FROM (
@@ -242,7 +242,7 @@ SELECT jsonb_build_object('section','runtime_current','row',value) FROM (
           'expires_at',expires_at,'age_seconds',extract(epoch FROM now()-observed_at),
           'fresh',observed_at<=now() AND expires_at>now(),'data',payload) AS value
         FROM public.runtime_observations
-        WHERE service IN ('market_gateway','quant_core','execution_guardian') ORDER BY service
+        WHERE service IN ('market_gateway','quant_core','execution_core') ORDER BY service
     ) fixed_rows;
 ROLLBACK;
 

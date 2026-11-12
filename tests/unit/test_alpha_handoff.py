@@ -143,7 +143,11 @@ def test_memory_reports_selected_deep_symbol_waiting_for_canonical_recovery(reas
         status=lambda: {"data_ready": True},
         canonical=SimpleNamespace(
             books={"ETHUSDT": SimpleNamespace(state_at=lambda at: sample.book.stream_state)},
-            flows={"ETHUSDT": SimpleNamespace(snapshot=lambda at: sample.flow)},
+            flows={
+                "ETHUSDT": SimpleNamespace(
+                    snapshot=lambda at: sample.flow, validity_at=lambda at: sample.flow.validity
+                )
+            },
             symbol_ready=lambda symbol, at: False,
             bar_rejections=lambda symbol, at: (
                 () if reason == "CANONICAL_DATA_NOT_READY" else (reason,)

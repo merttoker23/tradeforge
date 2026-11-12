@@ -3,7 +3,7 @@
 import argparse
 import http.client
 
-PORTS = {"market": 8101, "quant": 8102, "guardian": 8103, "dashboard": 8104}
+PORTS = {"market": 8101, "quant": 8102, "dashboard": 8104}
 
 
 def health(role: str) -> int:

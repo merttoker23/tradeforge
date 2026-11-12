@@ -6,6 +6,71 @@ import pytest
 
 from tests.intelligence_fixtures import engine, frame
 from tradeforge.intelligence.runtime import QuantWorker
+from tradeforge.runtime.analysis import AutonomousAnalysis
+
+
+def test_strategy_batches_reach_all_517_ready_pairs():
+    analysis = AutonomousAnalysis(None)
+    symbols = frozenset(f"TF{i:04d}USDT" for i in range(517))
+    observed = set()
+    for _ in range(22):
+        batch = analysis.next_batch(symbols)
+        assert len(batch) == 24
+        observed.update(batch)
+    assert observed == symbols
+
+
+def test_small_deep_tier_is_evaluated_before_microstructure_expires(monkeypatch):
+    """Even a 24-pair tier must not age all quotes during serial input validation."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from apps.quant_core import runtime
+    from tradeforge.persistence.db import Database
+
+    at = [frame(1).as_of]
+    db = Database("postgresql+psycopg://unused@127.0.0.1:1/unused")
+    worker = QuantWorker(db, clock=lambda: at[0])
+    worker.detector.update(frame(1))
+    analysis = AutonomousAnalysis(db, clock=lambda: at[0])
+    ready = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
+    evaluated = []
+
+    async def handoff(*args, **kwargs):
+        selected = kwargs.get("symbols")
+        selected = ready if selected is None else ready.intersection(selected)
+        return {
+            "as_of": at[0], "markets": [],
+            "deep_status": [{"symbol": s, "ready": True} for s in sorted(selected)],
+        }
+
+    def tick(**kwargs):
+        worker.state = worker._state("ANALYZED", True, 0)
+
+    def inputs(db, features, feed, **kwargs):
+        selected = kwargs.get("symbols")
+        selected = ready if selected is None else ready.intersection(selected)
+        # Full-universe feature validation costs time for each joined pair.
+        at[0] += timedelta(seconds=3 * len(selected))
+        return tuple(SimpleNamespace(instrument=SimpleNamespace(symbol=s),
+                                     source_at=feed["as_of"]) for s in sorted(selected))
+
+    def evaluate(samples, **kwargs):
+        for sample in samples:
+            if (at[0] - sample.source_at).total_seconds() <= 5:
+                evaluated.append(sample.instrument.symbol)
+
+    monkeypatch.setattr(runtime, "fetch_memory", handoff)
+    monkeypatch.setattr(runtime, "alpha_inputs", inputs)
+    monkeypatch.setattr(runtime, "save_runtime", lambda *args: None)
+    monkeypatch.setattr(worker, "tick", tick)
+    monkeypatch.setattr(analysis, "evaluate", evaluate)
+    try:
+        for _ in ready:
+            asyncio.run(runtime.run_cycle(worker, analysis, object(), "offline-token"))
+        assert evaluated == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    finally:
+        db.close()
 
 
 @pytest.mark.parametrize("reason", ["UNIVERSE_MISSING", "UNIVERSE_STALE", "WAITING_HISTORY_SWEEP"])
@@ -82,7 +147,7 @@ def test_handoff_failure_reports_stage_and_never_reuses_old_market_samples(monke
     worker = QuantWorker(db)
     worker.market_samples = (frame(1).observations[0].market,)
 
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         raise OSError("PASSWORD_SENTINEL")
 
     monkeypatch.setattr(runtime, "fetch_memory", fail)
@@ -113,7 +178,7 @@ def test_alpha_stage_failure_is_persisted_as_safe_metadata(monkeypatch):
     worker.detector = detector
     captured = []
 
-    async def handoff(*args):
+    async def handoff(*args, **kwargs):
         return {"markets": []}
 
     def tick(**kwargs):
@@ -122,7 +187,7 @@ def test_alpha_stage_failure_is_persisted_as_safe_metadata(monkeypatch):
         )
         worker.state = worker._state("ANALYZED", True, 0)
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise ValueError("PASSWORD_SENTINEL")
 
     monkeypatch.setattr(runtime, "fetch_memory", handoff)
@@ -154,9 +219,9 @@ def test_unknown_regime_is_explained_instead_of_just_waiting_for_a_bar(monkeypat
         worker.loaded, worker.detector = True, detector
         monkeypatch.setattr(worker, "_frame", lambda now: (None, "WAITING_CLOSED_BAR"))
         state = worker.tick(persist=False)
-        assert state["analysis_ready"] is False
+        assert state["analysis_ready"] is True
         assert state["regime_label"] == "UNKNOWN"
-        assert state["reason"] == "REGIME_UNKNOWN"
+        assert state["regime_tradeable"] is False
     finally:
         db.close()
 
@@ -214,7 +279,7 @@ def test_last_completed_evaluation_survives_cycles_without_new_results(monkeypat
     failing = [False]
     rejections = [[{"symbol": "ETHUSDT", "reason": "BOOK_UNAVAILABLE"}]]
 
-    async def handoff(*args):
+    async def handoff(*args, **kwargs):
         if failing[0] and interruption == "handoff":
             raise OSError("offline")
         return {"markets": [], "deep": [], "deep_status": []}
@@ -241,6 +306,15 @@ def test_last_completed_evaluation_survives_cycles_without_new_results(monkeypat
             "evaluated_count": 2 if samples else 0,
             "reason_counts": {"SPREAD_GATE": 2} if samples else {},
             "symbol_results": [{"symbol": "BTCUSDT", "state": "NO_TRADE"}] if samples else [],
+            "symbol_summaries": [
+                {"symbol": "BTCUSDT", "decision": "NO_TRADE", "reasons": ["SPREAD_GATE"]}
+            ]
+            if samples
+            else [],
+            "analyzed_symbols": 1 if samples else 0,
+            "evaluation_total": 2 if samples else 0,
+            "analysis_cycle_total": 1 if samples else 0,
+            "last_analysis_at": at[0].isoformat() if samples else None,
         }
         return 0
 
@@ -274,7 +348,10 @@ def test_last_completed_evaluation_survives_cycles_without_new_results(monkeypat
         asyncio.run(runtime.run_cycle(worker, analysis, object(), "offline-token"))
         assert worker.state["last_evaluation"] == completed
         assert captured[-1]["last_evaluation"] == completed
-        assert worker.state.get("evaluated_count", 0) == 0
+        # The last completed evaluation's counters describe the analysed
+        # pairs. A failed or empty cycle is not new evidence about them.
+        assert worker.state.get("evaluated_count", 0) == 2
+        assert worker.state.get("analyzed_symbols", 0) == 1
         assert worker.state["execution_ready"] is False
         assert worker.state["last_input_check"]["input_rejections"] == rejections[0]
         if interruption == "not_ready" or interruption == "handoff":

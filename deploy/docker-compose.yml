@@ -59,7 +59,7 @@ services:
     command: [migrate]
     depends_on:
       postgres: {condition: service_healthy}
-    secrets: [postgres_password, market_password, quant_password, guardian_password, dashboard_password]
+    secrets: [postgres_password, market_password, quant_password, dashboard_password]
     networks: [state]
 
   market_gateway:
@@ -77,28 +77,15 @@ services:
   quant_core:
     <<: *app
     command: [quant]
-    secrets: [quant_password, gateway_token]
-    networks: [state]
-    healthcheck:
-      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, quant]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
-  execution_guardian:
-    <<: *app
-    command: [guardian]
     environment:
       <<: *environment
       TRADEFORGE_MODE: ${TF_MODE:-paper}
-      TF_DEMO_ORDERS: ${TF_DEMO_ORDERS:-false}
-      TF_DEMO_TRIAL: ${TF_DEMO_TRIAL:-false}
-    secrets: [guardian_password, gateway_token]
+      TF_AUTO_ORDERS: ${TF_AUTO_ORDERS:-false}
+    secrets: [quant_password, gateway_token]
     networks: [state, egress]
     volumes: [postgres_state:/postgres-volume:ro]
     healthcheck:
-      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, guardian]
+      test: [CMD, python, -m, tradeforge.runtime.healthcheck, --service, quant]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -157,7 +144,6 @@ secrets:
   postgres_password: {file: "${TF_SECRETS_DIR:?set a private Linux secret directory}/postgres_password"}
   market_password: {file: "${TF_SECRETS_DIR}/market_password"}
   quant_password: {file: "${TF_SECRETS_DIR}/quant_password"}
-  guardian_password: {file: "${TF_SECRETS_DIR}/guardian_password"}
   dashboard_password: {file: "${TF_SECRETS_DIR}/dashboard_password"}
   gateway_token: {file: "${TF_SECRETS_DIR}/gateway_token"}
   dashboard_login: {file: "${TF_SECRETS_DIR}/dashboard_login"}

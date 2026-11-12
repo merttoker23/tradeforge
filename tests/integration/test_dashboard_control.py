@@ -10,14 +10,14 @@ from sqlalchemy import text
 
 def setup(db):
     from tradeforge.dashboard.auth import Principal
-    from tradeforge.dashboard.control import GuardianCommands
+    from tradeforge.dashboard.control import ExecutionCommands
     from tradeforge.risk.storage import RiskService
 
     at = [datetime.now(UTC)]
     operator = Principal("operator", frozenset({"read", "control"}))
     risk = RiskService(db, clock=lambda: at[0])
     risk.state()
-    return at, operator, risk, GuardianCommands(db, clock=lambda: at[0])
+    return at, operator, risk, ExecutionCommands(db, clock=lambda: at[0])
 
 
 def request(action="resume", version=0, key=None):
@@ -84,7 +84,7 @@ def test_guardian_rejects_unsafe_rearm_expiry_and_cas(migrated):
     body = request()
     seed(migrated, body, at[0])
     guardian.run_once(ready=lambda: False)
-    assert outcome(migrated, body["idempotency_key"])["result"] == "GUARDIAN_NOT_READY"
+    assert outcome(migrated, body["idempotency_key"])["result"] == "EXECUTION_CORE_NOT_READY"
     assert risk.state().kill_switch
     late = request()
     seed(migrated, late, at[0])
@@ -100,14 +100,14 @@ def test_guardian_rejects_unsafe_rearm_expiry_and_cas(migrated):
 
 
 def test_stop_commands_apply_even_when_guardian_unsafe_and_survive_restart(migrated):
-    from tradeforge.dashboard.control import GuardianCommands
+    from tradeforge.dashboard.control import ExecutionCommands
     from tradeforge.risk.storage import RiskService
 
     at, operator, risk, guardian = setup(migrated)
     risk.set_kill_switch(False, reason="TEST_SETUP")
     body = request("pause", version=1)
     seed(migrated, body, at[0])
-    restarted = GuardianCommands(migrated, clock=lambda: at[0])
+    restarted = ExecutionCommands(migrated, clock=lambda: at[0])
     restarted.run_once(ready=lambda: False)
     assert RiskService(migrated).state().kill_switch
     assert outcome(migrated, body["idempotency_key"])["status"] == "APPLIED"
@@ -151,19 +151,19 @@ def test_result_audit_failure_rolls_back_risk_and_command_atomically(migrated):
 
 
 def test_testnet_trial_requires_testnet_guardian_and_preserves_halt(migrated):
-    from tradeforge.dashboard.control import GuardianCommands
+    from tradeforge.dashboard.control import ExecutionCommands
 
     at, _, risk, guardian = setup(migrated)
     denied = request("testnet_start")
     seed(migrated, denied, at[0])
     guardian.run_once(ready=lambda: True)
-    assert outcome(migrated, denied["idempotency_key"])["result"] == "TESTNET_GUARDIAN_REQUIRED"
+    assert outcome(migrated, denied["idempotency_key"])["result"] == "TESTNET_EXECUTION_REQUIRED"
     allowed = request("testnet_start")
     seed(migrated, allowed, at[0])
     guardian.run_once(ready=lambda: True, testnet=True)
     assert outcome(migrated, allowed["idempotency_key"])["status"] == "APPLIED"
     assert risk.state().kill_switch
-    restarted = GuardianCommands(migrated, clock=lambda: at[0])
+    restarted = ExecutionCommands(migrated, clock=lambda: at[0])
     assert restarted.testnet_authority() == (True, True)
     stop = request("testnet_stop", version=risk.state().version)
     seed(migrated, stop, at[0])

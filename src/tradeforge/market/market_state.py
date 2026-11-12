@@ -82,7 +82,20 @@ class MarketState:
             if len(self._series) >= self.max_series:
                 raise ValueError("SERIES_BUDGET_EXHAUSTED")
             self._series[bar.key] = BarWindow(self.capacity)
-        return self._series[bar.key].add(bar)
+        added = self._series[bar.key].add(bar)
+        if added:
+            # A closed bar that ended after a recorded interruption proves that
+            # the stream resumed. The derived series quality is authoritative
+            # again, so the recorded failure must not keep a recovered series
+            # unavailable while a rate-limited repair is still pending.
+            history = self._failures.get(bar.key)
+            if history:
+                remaining = [entry for entry in history if entry[0] > bar.close_at]
+                if remaining:
+                    self._failures[bar.key] = remaining
+                else:
+                    del self._failures[bar.key]
+        return added
 
     def ingest(self, event: MarketEvent, key: InstrumentKey) -> bool:
         bar = closed_kline(event, key)

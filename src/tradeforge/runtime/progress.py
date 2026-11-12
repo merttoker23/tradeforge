@@ -102,6 +102,7 @@ class RuntimeProgress:
     ) -> None:
         self.advance("DISPATCH_COMPLETE")
         self.state.update(
+            healthy=True,
             data_ready=data_ready,
             analysis_ready=analysis_ready,
             execution_ready=execution_ready,

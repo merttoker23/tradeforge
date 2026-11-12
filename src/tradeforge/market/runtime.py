@@ -234,9 +234,11 @@ class GatewayPersistence:
 
     async def history(self, stop: asyncio.Event) -> None:
         # Network latency overlaps, but every attempt and retry shares the same
-        # four-starts/second schedule. Only four symbols are held in flight.
+        # two-starts/second schedule. Only four symbols are held in flight.
+        # Combined with the quote loop this stays under the shared Binance
+        # USD-M weight budget instead of oscillating into 429 cooldowns.
         async with PublicMarketClient(
-            min_interval=0.25,
+            min_interval=0.5,
             max_concurrency=4,
             environment=getattr(self.gateway, "environment", "live"),
         ) as client:
@@ -631,6 +633,7 @@ class GatewayPersistence:
                     self.gateway.quote_attempts += 1
                     if await self.quote_once(client):
                         self.gateway.quote_last_reason = "OK"
+                        self.gateway.quote_last_success_at = self.gateway.clock().isoformat()
                 except Exception as error:
                     # Never publish transport bodies/exception text or renew old evidence.
                     self.gateway.quote_failures += 1
@@ -642,7 +645,13 @@ class GatewayPersistence:
                         if isinstance(error, TimeoutError)
                         else "QUOTE_UNAVAILABLE"
                     )
-                await pause(stop, 2)
+                # The alpha engines accept market evidence that is at most
+                # five seconds old. The client already spaces the three REST
+                # calls one second apart, so the pause must stay short
+                # enough for the sampled evidence to remain inside that
+                # window. The shared REST budget keeps ample headroom for
+                # the history sweep.
+                await pause(stop, 1)
 
     def rest_markets(
         self, quotes: list[object], marks: object, tickers: object, at: datetime

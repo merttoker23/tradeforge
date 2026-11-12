@@ -28,7 +28,7 @@ def event(
 ):
     at = START + timedelta(seconds=second)
     row = {"s": "BTCUSDT", "E": int(at.timestamp() * 1000)}
-    if kind == "depth":
+    if kind.startswith("depth"):
         row.update(
             U=first,
             u=last,
@@ -58,6 +58,61 @@ def snapshot(last=100):
         "bids": [["100", "1"], ["99", "2"]],
         "asks": [["102", "1"]],
     }
+
+
+def test_partial_depth_frames_replace_the_book_without_a_rest_snapshot():
+    book = LocalOrderBook(instrument())
+    book.begin(1)
+    assert book.ingest(event(
+        "depth20@500ms", last=101, bids=[["100", "3"]], asks=[["102", "5"]]
+    ))
+    first = book.snapshot(START + timedelta(seconds=1))
+    assert first.stream_state is StreamState.READY
+    assert book.ingest(event(
+        "depth20@500ms", first=105, last=106, previous=104, second=2,
+        bids=[["99", "2"]], asks=[["103", "4"]],
+    ))
+    second = book.snapshot(START + timedelta(seconds=2))
+    assert second.stream_state is StreamState.READY
+    assert second.bids == ((Decimal("99"), Decimal("2")),)
+    assert second.asks == ((Decimal("103"), Decimal("4")),)
+    assert second.last_update_id == 106
+    assert book.state_at(START + timedelta(seconds=8)) is StreamState.STALE
+
+
+def test_buffered_stream_event_bridges_a_later_rest_snapshot():
+    """Production order: the stream event is buffered before the snapshot.
+
+    The REST snapshot is fetched after the stream event was received, so its
+    event time is newer. Synchronisation is proven by update-id continuity
+    only; an event-time comparison would discard the bridge event and the
+    book could never become READY.
+    """
+    book = LocalOrderBook(instrument())
+    book.begin(1)
+    assert book.ingest(event(first=99, last=101, previous=98, second=1))
+    later = {
+        "lastUpdateId": 100,
+        "E": int((START + timedelta(seconds=5)).timestamp() * 1000),
+        "bids": [["100", "1"], ["99", "2"]],
+        "asks": [["102", "1"]],
+    }
+    book.install(later, START + timedelta(seconds=6), generation=1)
+    view = book.snapshot(START + timedelta(seconds=6))
+    assert view.stream_state is StreamState.READY
+    assert view.last_update_id == 101
+
+
+def test_snapshot_bridge_accepts_a_direct_update_id_successor():
+    """The first event after a snapshot may continue it exactly."""
+    book = LocalOrderBook(instrument())
+    book.begin(1)
+    book.install(snapshot(100), START + timedelta(seconds=2), generation=1)
+    assert book.snapshot(START + timedelta(seconds=2)).stream_state is StreamState.UNSYNCED
+    assert book.ingest(event(first=101, last=101, previous=100, second=3))
+    view = book.snapshot(START + timedelta(seconds=3))
+    assert view.stream_state is StreamState.READY
+    assert view.last_update_id == 101
 
 
 def test_depth_snapshot_bridge_continuity_gap_and_rebuild():
@@ -132,6 +187,25 @@ def test_depth_duplicate_crossing_overflow_and_stale():
         )
     assert len(book.pending) <= 2
     assert book.snapshot(START + timedelta(seconds=6)).stream_state is StreamState.UNSYNCED
+
+
+def test_flow_survives_a_stream_generation_change_without_losing_evidence():
+    """A reconnect is not missing evidence while the trade ids stay contiguous.
+
+    The aggregate trade id is contiguous per symbol, so the first trade after
+    a reconnect proves that no trade was missed. Restarting the availability
+    window there would hide a healthy flow for a whole period.
+    """
+    flow = TradeFlow(instrument(), capacity=8, period_seconds=10)
+    flow.begin(1, START)
+    assert flow.ingest(event("aggTrade", last=1, second=1))
+    assert flow.ingest(event("aggTrade", last=2, second=2, maker=True, qty="0.5"))
+    flow.begin(2, START + timedelta(seconds=3))
+    assert flow.ingest(event("aggTrade", last=3, second=4, generation=2))
+    assert flow.snapshot(START + timedelta(seconds=12)).validity is DataQuality.OK
+    # A real discontinuity is still reported as a gap.
+    assert flow.ingest(event("aggTrade", last=5, second=5, generation=2))
+    assert flow.snapshot(START + timedelta(seconds=12)).validity is DataQuality.GAP
 
 
 def test_trade_flow_exact_signed_dedup_missing_and_point_in_time():

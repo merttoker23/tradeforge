@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from tradeforge.config.settings import load_settings
 
-SERVICES = frozenset({"market_gateway", "quant_core", "execution_guardian", "dashboard"})
+SERVICES = frozenset({"market_gateway", "quant_core", "dashboard"})
 
 
 def snapshot(service: str) -> dict[str, str | bool]:

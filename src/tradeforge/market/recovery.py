@@ -85,7 +85,7 @@ class PublicMarketClient:
     async def __aenter__(self) -> "PublicMarketClient":
         if self._default_transport:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5, connect=2, sock_read=3),
+                timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=10),
                 trust_env=False,
                 cookie_jar=aiohttp.DummyCookieJar(),
             )

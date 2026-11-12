@@ -171,8 +171,10 @@ def test_watch_selection_change_keeps_global_socket_open(monkeypatch):
             yield Socket()
 
     async def paused(event, seconds):
-        await asyncio.sleep(0.005)
-        if refresher.calls >= 3:
+        # The subscription delta is paced by the control-message budget, so the
+        # scenario must outlive one control interval to observe it.
+        await asyncio.sleep(0.05)
+        if refresher.calls >= 8:
             stop.set()
 
     monkeypatch.setattr("tradeforge.market.market_gateway.pause", paused)
@@ -192,6 +194,9 @@ def test_watch_selection_change_keeps_global_socket_open(monkeypatch):
     assert len(global_generation) == 1
     assert sum(GLOBAL_STREAMS[0] in group for group in opens) == 1
     assert any("ethusdt@kline_1m" in group for group in opens)
+    # The mandatory candle group keeps its connection. Only the discretionary
+    # stream set changes, so the retained streams are never interrupted.
+    assert sum("btcusdt@kline_15m" in group for group in opens) == 1
 
 
 def test_fresh_websocket_marks_and_costs_need_no_rest_requests():

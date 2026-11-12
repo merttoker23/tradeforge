@@ -3,6 +3,7 @@
 import asyncio
 
 from tests.market_fixtures import START, instrument
+from tests.unit.test_market_state_depth_flow import event
 from tradeforge.domain.market import Timeframe
 from tradeforge.market.canonical_feed import CanonicalFeed
 from tradeforge.market.streams import StreamSpec
@@ -25,6 +26,9 @@ def test_depth_snapshot_runs_before_slow_unrelated_bar_repair():
                 depth.set()
                 return False
 
+        await feed.maintain_depth(Recovery())
+        assert not depth.is_set()
+        assert feed.consume(event())
         task = asyncio.create_task(feed.maintain(Recovery(), lambda view: None, START))
         try:
             await asyncio.wait_for(depth.wait(), 0.2)
@@ -85,6 +89,7 @@ def test_depth_can_recover_again_while_candle_worker_is_still_blocked():
         )
         try:
             await asyncio.wait_for(entered.wait(), 0.5)
+            assert feed.consume(event())
             await runtime.depth_cycle(gateway, None, Recovery(), require_admission=False)
             await runtime.depth_cycle(gateway, None, Recovery(), require_admission=False)
             assert seen == 2 and not repair.done()

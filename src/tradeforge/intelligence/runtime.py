@@ -12,7 +12,12 @@ from sqlalchemy import text
 from tradeforge.domain.common import DataQuality, utc
 from tradeforge.domain.market import ClosedBar, MarketSnapshot, RegimeLabel
 from tradeforge.intelligence.inputs import MarketFrame, MarketObservation
-from tradeforge.intelligence.models import FeatureSnapshot, digest
+from tradeforge.intelligence.models import (
+    REGIME_ALGORITHM_VERSION,
+    FeatureSnapshot,
+    RegimePolicy,
+    digest,
+)
 from tradeforge.intelligence.opportunity import SurveillancePolicy
 from tradeforge.intelligence.ranking import rank_market
 from tradeforge.intelligence.regime import RegimeEngine
@@ -39,15 +44,71 @@ HISTORY_QUERY = text("""
 
 # Count probe: detects any change (new bars, revisions, backfills) in the
 # observable history for our instruments without returning full row payloads.
+# The probe is bounded to the analysis window. An unbounded count scans every
+# retained period of every instrument (millions of rows) on each tick and
+# exhausts the statement budget before the analysis can run.
 COUNT_PROBE = text("""
             SELECT count(*) FROM closed_bar_observations bars
             WHERE bars.instrument_id IN (
                 SELECT id FROM unnest(CAST(:ids AS uuid[])) AS ids(id))
                 AND bars.timeframe=:tf
+                AND bars.open_at>=:start
                 AND bars.observed_at<=:at AND bars.close_at<=:at
         """)
 
 MAX_OPPORTUNITIES = 64
+
+# The benchmark instrument every relative (BTC-relative) feature is measured
+# against. A frame without it cannot estimate beta or relative strength.
+BENCHMARK_SYMBOL = "BTCUSDT"
+
+# Analysis counters describe the last completed strategy evaluation. A tick
+# replaces the worker state, but these counters describe the analysed pairs
+# and must not be erased by an unrelated pipeline step.
+ANALYSIS_COUNTERS = (
+    "candidate_count",
+    "reason_counts",
+    "evaluated_count",
+    "analysis_symbols",
+    "analyzed_symbols",
+    "evaluation_total",
+    "analysis_cycle_total",
+    "last_analysis_at",
+    "symbol_results",
+    "symbol_summaries",
+)
+
+
+def frame_coverage(
+    observations: tuple[MarketObservation, ...], eligible: tuple[Any, ...]
+) -> float:
+    """Share of the eligible universe measured on the frame's closed period."""
+    return len(observations) / len(eligible) if eligible else 0.0
+
+
+def publish_block(
+    observations: tuple[MarketObservation, ...],
+    eligible: tuple[Any, ...],
+    policy: RegimePolicy,
+) -> str | None:
+    """Reject a frame whose closed period or benchmark is still incomplete.
+
+    A cross-sectional frame is only meaningful when every member is measured
+    on the same closed period. Closed bars reach the store one instrument at
+    a time, so a newly closed period is complete only after the universe
+    reported it. Publishing a partial period would replace a consistent scan
+    with a partial one and, whenever the benchmark is still missing, would
+    destroy every relative (BTC-relative) feature of the universe.
+    """
+    if frame_coverage(observations, eligible) < policy.minimum_coverage:
+        return "WAITING_HISTORY_SWEEP"
+    if any(getattr(key, "symbol", None) == BENCHMARK_SYMBOL for key in eligible) and not any(
+        row.instrument.symbol == BENCHMARK_SYMBOL for row in observations
+    ):
+        # The benchmark defines the relative feature set. Without it the
+        # engine cannot estimate beta, so the period is not publishable.
+        return "FRAME_BENCHMARK_MISSING"
+    return None
 
 
 class QuantWorker:
@@ -83,21 +144,44 @@ class QuantWorker:
 
     def _state(self, reason: str, ready: bool, processed: int) -> dict[str, Any]:
         latest = self.detector.latest
-        return {
+        now = utc(self.clock())
+        period = self.detector.policy.timeframe.seconds
+        max_age = period * self.detector.policy.max_age_periods
+        source_fresh = bool(
+            latest and 0 <= (now - latest.frame.source_at).total_seconds() <= max_age
+        )
+        tradeable = bool(
+            source_fresh
+            and latest is not None
+            and latest.state.label not in {RegimeLabel.UNKNOWN, RegimeLabel.TRANSITION}
+        )
+        state = {
             **self.progress.state,
             **self.history_metrics,
-            "evaluated_at": self.clock().isoformat(),
+            "evaluated_at": now.isoformat(),
             "alive": True,
             "data_ready": ready,
+            "analysis_ready": ready,
             "trading_ready": False,
             "live": False,
             "orders_enabled": False,
             "reason": reason,
             "processed": processed,
             "last_source_at": latest.frame.source_at.isoformat() if latest else None,
+            "source_fresh": source_fresh,
+            "regime_tradeable": tradeable,
+            "analysis_timeframe": self.detector.policy.timeframe.value,
+            "max_source_age_seconds": max_age,
             "regime_label": latest.state.label.value if latest else "UNKNOWN",
             "regime_reasons": list(latest.reason_codes) if latest else [],
         }
+        # The last completed evaluation survives a tick that produced no new
+        # strategy evidence. Only a newer evaluation may replace it.
+        previous = getattr(self, "state", None) or {}
+        for key in ANALYSIS_COUNTERS:
+            if key in previous:
+                state[key] = previous[key]
+        return state
 
     def status(self) -> dict[str, Any]:
         state = dict(self.state)
@@ -107,25 +191,46 @@ class QuantWorker:
                 data_ready=False,
                 analysis_ready=False,
                 execution_ready=False,
+                source_fresh=False,
+                regime_tradeable=False,
                 reason="QUANT_TICK_STALE",
             )
         return state
 
     def _load(self, now: datetime) -> None:
-        with self.db.transaction() as c:
-            payload = c.scalar(
-                text(
-                    "SELECT payload FROM regime_snapshots WHERE as_of<=:at "
-                    "ORDER BY as_of DESC LIMIT 1"
-                ),
-                {"at": now},
-            )
-        if payload is not None:
-            # Cursor survives crashes; statistical history warms up conservatively
-            # after restart. Never claim recovered confidence from a heartbeat.
-            self.detector.latest = FeatureSnapshot.model_validate_json(
-                canonical(payload), context={"now": now}
-            )
+        policy = self.detector.policy
+        period = timedelta(seconds=policy.timeframe.seconds)
+        cursor = now
+        history: list[FeatureSnapshot] = []
+        for _ in range(policy.confirmation + policy.cooldown + 1):
+            with self.db.transaction() as c:
+                payload = c.scalar(
+                    text(
+                        "SELECT payload FROM regime_snapshots WHERE as_of<=:at "
+                        "ORDER BY as_of DESC LIMIT 1"
+                    ),
+                    {"at": cursor},
+                )
+            if payload is None:
+                break
+            snapshot = FeatureSnapshot.model_validate_json(canonical(payload), context={"now": now})
+            if not history:
+                self.detector.latest = snapshot
+            if snapshot.policy != policy or snapshot.algorithm_version != REGIME_ALGORITHM_VERSION:
+                break
+            if history and history[-1].frame.source_at - snapshot.frame.source_at != period:
+                break
+            history.append(snapshot)
+            # Revisions of this closed period share its source time. Only an
+            # earlier, distinct period can supply another confirmation.
+            cursor = snapshot.frame.source_at
+        if history:
+            restored = RegimeEngine(policy)
+            for snapshot in reversed(history):
+                if snapshot is history[0]:
+                    self._before_current = deepcopy(restored)
+                restored.restore_confirmation(snapshot)
+            self.detector = restored
         self.loaded = True
 
     @property
@@ -162,15 +267,19 @@ class QuantWorker:
             self._bar_cache.pop(bar_hash(old), None)
         ring[bar.open_at] = bar
         self._bar_cache[input_hash] = bar
+        self._history_signature = None
         self._history_dirty = True
 
     def _load_full(self, rows: tuple[Any, ...] | list[Any], now: datetime) -> None:
         self._rings.clear()
-        # _bar_cache is intentionally preserved: parsed bars are reused by
-        # input_hash identity across ticks, so only new rows are decoded.
+        # Reuse parsed rows by input hash, then release those outside the ring.
+        retained = {}
         for row in rows:
             bar = self._parse(row, now)
             self._rings.setdefault(bar.key, {})[bar.open_at] = bar
+            retained[row.input_hash] = bar
+        self._bar_cache = retained
+        self._history_signature = self._signature(rows)
         if rows:
             self._max_observed_at = max(row.observed_at for row in rows)
         self._history_dirty = True
@@ -189,7 +298,8 @@ class QuantWorker:
         self.history = [
             bar for key in sorted(self._rings) for _, bar in sorted(self._rings[key].items())
         ]
-        self._history_signature = self._current_signature()
+        if self._history_signature is None:
+            self._history_signature = self._current_signature()
         self._history_dirty = False
 
     def _frame(self, now: datetime) -> tuple[MarketFrame | None, str]:
@@ -255,11 +365,19 @@ class QuantWorker:
             # revised, or backfilled evidence arrived and we must reload the
             # bounded window. When the count is unchanged, only an incremental
             # probe for recently observed revisions is needed.
+            window_start = now - timedelta(
+                seconds=timeframe.seconds * (self._history_limit + 1)
+            )
             live_count = c.execute(
                 COUNT_PROBE,
-                {"ids": identifiers, "tf": timeframe.value, "at": now},
+                {
+                    "ids": identifiers,
+                    "tf": timeframe.value,
+                    "at": now,
+                    "start": window_start,
+                },
             ).scalar()
-            if self._db_total_count is None or live_count != self._db_total_count:
+            if self._max_observed_at is None or live_count != self._db_total_count:
                 # Full bounded reload: first load, metadata change, or
                 # evidence count changed (new/backfilled/revised bars).
                 rows = c.execute(
@@ -278,7 +396,6 @@ class QuantWorker:
                 # Count unchanged: probe only for recently observed revisions.
                 # _db_total_count is not None here, so a full load has run and
                 # _max_observed_at is set.
-                assert self._max_observed_at is not None
                 cursor = self._max_observed_at - timedelta(seconds=max(60, timeframe.seconds // 4))
                 new_rows = c.execute(
                     text("""
@@ -304,7 +421,6 @@ class QuantWorker:
                         self._max_observed_at = max(
                             self._max_observed_at or row.observed_at, row.observed_at
                         )
-                    self._history_dirty = True
                     self.history_metrics.update(
                         history_query_ms=round((time.perf_counter() - query_started) * 1000, 3),
                         history_rows=len(new_rows),
@@ -371,15 +487,14 @@ class QuantWorker:
             history_current_members=current_members,
             history_current_coverage=current_coverage,
         )
-        # Analysis is fail-closed until enough eligible members prove the same
-        # finalized period. A partial sweep must never publish a regime.
-        if current_coverage < self.detector.policy.minimum_coverage:
-            return None, "WAITING_HISTORY_SWEEP"
-        closed = (
-            current_close
-            if sweep_incomplete
-            else max((b.close_at for bars in series.values() for b in bars), default=None)
+        # Partial history never blocks per-pair analysis. Coverage below the
+        # regime policy remains visible as LOW_COVERAGE and makes the market
+        # regime non-tradeable, but already-finalized bars are still evidence.
+        self.history_metrics["history_sweep_complete"] = (
+            current_coverage >= self.detector.policy.minimum_coverage
         )
+        self.history_metrics["gateway_history_incomplete"] = sweep_incomplete
+        closed = max((b.close_at for bars in series.values() for b in bars), default=None)
         if closed is None:
             return None, "CLOSED_BARS_MISSING"
         if (
@@ -395,6 +510,7 @@ class QuantWorker:
                 return None, "WAITING_CLOSED_BAR"
             self.rebuild_current = (
                 history_changed
+                or not self.detector.series_count
                 or self.detector.latest.frame.universe.version_hash != universe.version_hash
             )
             known = {f.instrument.key: f.sample_count for f in self.detector.latest.features}
@@ -482,6 +598,12 @@ class QuantWorker:
             )
         if not observations:
             return None, "CONTIGUOUS_BARS_MISSING"
+        coverage = frame_coverage(observations, universe.eligible)
+        self.history_metrics["history_frame_members"] = len(observations)
+        self.history_metrics["history_frame_coverage"] = coverage
+        block = publish_block(observations, universe.eligible, self.detector.policy)
+        if block is not None:
+            return None, block
         frame = MarketFrame(
             schema_version=1,
             event_id=uuid5(
@@ -611,19 +733,31 @@ class QuantWorker:
                 <= (now - latest.frame.source_at).total_seconds()
                 <= self.detector.policy.timeframe.seconds * self.detector.policy.max_age_periods
             )
-            ready = bool(
-                fresh
-                and latest
-                and latest.state.label not in {RegimeLabel.UNKNOWN, RegimeLabel.TRANSITION}
-                and reason in {"ANALYZED", "WAITING_CLOSED_BAR"}
-            )
-            if not fresh and latest is not None:
-                reason = "ANALYSIS_STALE"
-            elif fresh and latest and reason in {"ANALYZED", "WAITING_CLOSED_BAR"}:
-                if latest.state.label is RegimeLabel.UNKNOWN:
-                    reason = "REGIME_UNKNOWN"
-                elif latest.state.label is RegimeLabel.TRANSITION:
-                    reason = "REGIME_TRANSITION"
+            # Readiness describes the evidence pipeline, not the strategy's
+            # permission to trade. TRANSITION/UNKNOWN is a strategy filter and
+            # must never stop per-pair analysis or turn health into an alarm.
+            blocked = reason in {
+                "UNIVERSE_MISSING",
+                "UNIVERSE_STALE",
+                "SYMBOL_BUDGET_EXHAUSTED",
+                "GATEWAY_TELEMETRY_UNSAFE",
+                "CLOSED_BARS_MISSING",
+                "ANALYSIS_STALE",
+                "CONTIGUOUS_BARS_MISSING",
+                # A period that is not yet complete cannot be analysed. The
+                # last complete scan stays visible, but it must not be
+                # presented as a fresh measurement of the current period.
+                "WAITING_HISTORY_SWEEP",
+                "FRAME_BENCHMARK_MISSING",
+            }
+            if not fresh:
+                ready = False
+                if latest is not None and not blocked:
+                    reason = "ANALYSIS_STALE"
+            else:
+                ready = not blocked
+            if latest is None and not fresh and not blocked:
+                reason = "ANALYSIS_NOT_OBSERVED"
             self.progress.state["healthy"] = True
             self.progress.complete(
                 data_ready=ready, analysis_ready=ready, execution_ready=False, reason=reason

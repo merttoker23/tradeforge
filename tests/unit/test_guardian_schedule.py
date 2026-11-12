@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
-from apps.execution_guardian import runtime
+from tradeforge.runtime import auto_execution as runtime
 
 
 def test_protection_refresh_runs_while_optional_work_is_blocked():
@@ -33,7 +33,7 @@ def test_protection_refresh_runs_while_optional_work_is_blocked():
             while not entered.is_set():
                 await asyncio.sleep(0)
             refresh = getattr(runtime, "protection_loop", None)
-            assert callable(refresh), "guardian has no independent protection schedule"
+            assert callable(refresh), "auto execution has no independent protection schedule"
             protection = asyncio.create_task(refresh(Recovery(), Stream(), interval=0.01))
             deadline = loop.time() + 1
             while not protected.is_set() and loop.time() < deadline:

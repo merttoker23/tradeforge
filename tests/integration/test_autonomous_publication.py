@@ -7,6 +7,16 @@ import pytest
 from sqlalchemy import text
 
 
+def test_symbol_wakeup_can_read_the_persisted_candidate_journal(migrated):
+    from types import SimpleNamespace
+
+    from tradeforge.runtime.demo_decisions import DemoDecisions
+
+    decisions = DemoDecisions(migrated, SimpleNamespace(clock=lambda: datetime.now(UTC)))
+    decisions.tick({}, symbols=frozenset({"BTCUSDT"}))
+    assert decisions.status()["autonomous_decisions"]["last_reason"] == "NO_ARMED_CANDIDATES"
+
+
 @pytest.mark.parametrize("trial", [False, True])
 def test_approved_demo_publication_commits_once_and_dispatches_once(migrated, trial, monkeypatch):
     from tests.decision_fixtures import NOW, advance, discovery, register, validated

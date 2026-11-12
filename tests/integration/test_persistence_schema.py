@@ -40,7 +40,7 @@ def test_migration_up_down_up_and_transactional_failure(database_url):
                 "consumer_receipts",
                 "schema_migrations",
             } <= names
-            assert connection.scalar(text("SELECT version_num FROM schema_migrations")) == "0008"
+            assert connection.scalar(text("SELECT version_num FROM schema_migrations")) == "0009"
         migrate(db, "base")
         with db.sql_engine.connect() as connection:
             assert "orders" not in inspect(connection).get_table_names()

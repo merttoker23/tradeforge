@@ -18,7 +18,6 @@ def provision(directory: Path) -> None:
         "postgres_password",
         "market_password",
         "quant_password",
-        "guardian_password",
         "dashboard_password",
         "gateway_token",
         "dashboard_login",

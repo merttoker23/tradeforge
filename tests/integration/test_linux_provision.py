@@ -8,7 +8,7 @@ from tradeforge.runtime.container import grant_runtime_access
 
 
 def test_linux_runtime_roles_cannot_acquire_order_or_peer_write_authority(migrated):
-    roles = ("tf_market", "tf_quant", "tf_dashboard", "tf_guardian")
+    roles = ("tf_market", "tf_quant", "tf_dashboard")
     with migrated.transaction() as connection:
         for role in roles:
             connection.execute(text(f"CREATE ROLE {role} NOLOGIN"))
@@ -19,9 +19,7 @@ def test_linux_runtime_roles_cannot_acquire_order_or_peer_write_authority(migrat
                 connection.execute(text(f"SET LOCAL ROLE {role}"))
                 assert connection.scalar(text("SELECT count(*) FROM instruments")) == 0
                 for table in ("orders", "execution_intents", "outbox", "positions", "commands"):
-                    allowed = role == "tf_guardian" or (
-                        role == "tf_dashboard" and table == "commands"
-                    )
+                    allowed = role == "tf_quant" or (role == "tf_dashboard" and table == "commands")
                     assert (
                         bool(
                             connection.scalar(
@@ -37,7 +35,7 @@ def test_linux_runtime_roles_cannot_acquire_order_or_peer_write_authority(migrat
                     assert connection.scalar(
                         text("SELECT has_table_privilege(current_user,'audit_log','INSERT')")
                     )
-                if role == "tf_guardian":
+                if role == "tf_quant":
                     connection.execute(
                         text(
                             "INSERT INTO audit_log(event_type,payload) "

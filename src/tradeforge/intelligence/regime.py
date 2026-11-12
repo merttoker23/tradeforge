@@ -95,6 +95,10 @@ class RegimeEngine:
             stats.last_close = row.current.close
             changed = stats.cusum.add(value)
             if btc is None:
+                # Without the benchmark there is no paired sample. The paired
+                # history is dropped instead of being carried across a period
+                # it never observed; a frame without the benchmark is not
+                # published by the worker in the first place.
                 stats.pair = self._new_pair()
             else:
                 stats.pair.add(btc, value)
@@ -247,6 +251,18 @@ class RegimeEngine:
             return target
         reasons.append("HYSTERESIS")
         return RegimeLabel.TRANSITION
+
+    def restore_confirmation(self, snapshot: FeatureSnapshot) -> None:
+        """Replay a persisted period's classification without replaying its returns."""
+        target, _ = self._classify(snapshot.frame, snapshot.features, [])
+        if self.latest is None and snapshot.state.label is target:
+            # The first retained period may already have a confirmed label.
+            # Its exact cooldown is unknown, so restore the conservative bound.
+            self._stable = self._candidate = target
+            self._cooldown = self.policy.cooldown
+        else:
+            self._label(target, [])
+        self.latest = snapshot
 
     def update(self, frame: MarketFrame) -> FeatureSnapshot:
         if frame.timeframe is not self.policy.timeframe:

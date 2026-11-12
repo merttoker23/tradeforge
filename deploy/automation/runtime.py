@@ -32,10 +32,10 @@ DC = [DOCKER, "compose", "-p", "forgetrade", "-f", str(COMPOSE)]
 # These statements execute in the same transaction as its Alembic SQL.
 BINANCE_0007_GRANTS = """
 REVOKE ALL ON public.binance_runtime, public.binance_credentials FROM PUBLIC;
-REVOKE ALL ON public.binance_credentials FROM tf_market, tf_quant, tf_guardian, tf_dashboard;
-GRANT SELECT ON public.binance_runtime TO tf_market, tf_quant, tf_guardian, tf_dashboard;
+REVOKE ALL ON public.binance_credentials FROM tf_market, tf_quant, tf_dashboard;
+GRANT SELECT ON public.binance_runtime TO tf_market, tf_quant, tf_dashboard;
 GRANT UPDATE (environment, revision, changed_at) ON public.binance_runtime TO tf_dashboard;
-GRANT SELECT ON public.binance_credentials TO tf_dashboard, tf_guardian;
+GRANT SELECT ON public.binance_credentials TO tf_dashboard, tf_quant;
 GRANT INSERT, UPDATE ON public.binance_credentials TO tf_dashboard;
 """
 

@@ -5,9 +5,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
-from tradeforge.runtime.maintenance import observation_admission, observe_storage
+from tradeforge.runtime.maintenance import StorageBudget, observation_admission, observe_storage
 from tradeforge.runtime.progress import RuntimeProgress
 from tradeforge.runtime.storage import save_runtime
+
+
+def set_storage_ready(monkeypatch, ready):
+    budget = StorageBudget(2 * 1024**3 if ready else 0, 0, 0)
+    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_budget", lambda db: budget)
 
 
 def test_guardian_progress_preserves_independent_storage_measurement(migrated, monkeypatch):
@@ -19,14 +24,14 @@ def test_guardian_progress_preserves_independent_storage_measurement(migrated, m
             return clock[0]
 
     monkeypatch.setattr("tradeforge.runtime.maintenance.datetime", ProbeClock)
-    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_ready", lambda db: True)
+    set_storage_ready(monkeypatch, True)
     assert observe_storage(migrated) is True
     clock[0] += timedelta(seconds=1)
     progress = RuntimeProgress(clock=lambda: clock[0])
     progress.advance("RECONCILIATION")
     at = clock[0]
     save_runtime(
-        migrated, "execution_guardian", at, at + timedelta(seconds=15), progress.snapshot()
+        migrated, "execution_core", at, at + timedelta(seconds=15), progress.snapshot()
     )
     assert observation_admission(migrated) is True
     with migrated.transaction() as c:
@@ -39,7 +44,7 @@ def test_guardian_heartbeat_cannot_renew_expired_storage_evidence(migrated):
     source = datetime.now(UTC) - timedelta(seconds=31)
     save_runtime(
         migrated,
-        "execution_guardian",
+        "execution_core",
         source,
         source + timedelta(seconds=30),
         {
@@ -49,7 +54,7 @@ def test_guardian_heartbeat_cannot_renew_expired_storage_evidence(migrated):
     )
     at = datetime.now(UTC)
     save_runtime(
-        migrated, "execution_guardian", at, at + timedelta(seconds=15), {"stage": "RECONCILIATION"}
+        migrated, "execution_core", at, at + timedelta(seconds=15), {"stage": "RECONCILIATION"}
     )
     assert observation_admission(migrated) is False
     with migrated.transaction() as c:
@@ -69,14 +74,14 @@ def test_failed_storage_probe_revokes_admission_after_heartbeat(migrated, monkey
             return clock[0]
 
     monkeypatch.setattr("tradeforge.runtime.maintenance.datetime", ProbeClock)
-    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_ready", lambda db: True)
+    set_storage_ready(monkeypatch, True)
     assert observe_storage(migrated) is True
     clock[0] += probe_delay
-    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_ready", lambda db: False)
+    set_storage_ready(monkeypatch, False)
     assert observe_storage(migrated) is False
     at = clock[0] = source + timedelta(seconds=2)
     save_runtime(
-        migrated, "execution_guardian", at, at + timedelta(seconds=15), {"stage": "RECONCILIATION"}
+        migrated, "execution_core", at, at + timedelta(seconds=15), {"stage": "RECONCILIATION"}
     )
     assert observation_admission(migrated) is False
     with migrated.transaction() as c:
@@ -94,9 +99,9 @@ def test_equal_time_positive_probe_cannot_resurrect_failed_storage(migrated, mon
             return source
 
     monkeypatch.setattr("tradeforge.runtime.maintenance.datetime", ProbeClock)
-    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_ready", lambda db: False)
+    set_storage_ready(monkeypatch, False)
     assert observe_storage(migrated) is False
-    monkeypatch.setattr("tradeforge.runtime.maintenance.storage_ready", lambda db: True)
+    set_storage_ready(monkeypatch, True)
     assert observe_storage(migrated) is True
     assert observation_admission(migrated) is False
     with migrated.transaction() as c:
@@ -110,7 +115,7 @@ def test_equal_time_heartbeat_preserves_original_storage_expiry(migrated):
     source = at - timedelta(seconds=31)
     save_runtime(
         migrated,
-        "execution_guardian",
+        "execution_core",
         at,
         at + timedelta(seconds=15),
         {
@@ -119,7 +124,7 @@ def test_equal_time_heartbeat_preserves_original_storage_expiry(migrated):
             "stage": "BEFORE",
         },
     )
-    save_runtime(migrated, "execution_guardian", at, at + timedelta(seconds=15), {"stage": "AFTER"})
+    save_runtime(migrated, "execution_core", at, at + timedelta(seconds=15), {"stage": "AFTER"})
     assert observation_admission(migrated) is False
     with migrated.transaction() as c:
         payload = c.scalar(text("SELECT payload FROM runtime_observations"))
@@ -134,7 +139,7 @@ def test_storage_admission_requires_original_safe_measurement_time(migrated, sou
     at = datetime.now(UTC)
     save_runtime(
         migrated,
-        "execution_guardian",
+        "execution_core",
         at,
         at + timedelta(seconds=15),
         {

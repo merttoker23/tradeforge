@@ -16,7 +16,7 @@ def test_canonical_cycle_persists_as_market_without_feature_write_authority(migr
     from apps.market_gateway import runtime
 
     with migrated.transaction() as c:
-        for role in ("tf_market", "tf_quant", "tf_dashboard", "tf_guardian"):
+        for role in ("tf_market", "tf_quant", "tf_dashboard"):
             c.execute(text(f"CREATE ROLE {role} NOLOGIN"))
         grant_runtime_access(c, migrated.sql_engine.url.database)
     market = Database(migrated.sql_engine.url)
@@ -45,6 +45,6 @@ def test_canonical_cycle_persists_as_market_without_feature_write_authority(migr
     finally:
         market.close()
         with migrated.transaction() as c:
-            for role in ("tf_market", "tf_quant", "tf_dashboard", "tf_guardian"):
+            for role in ("tf_market", "tf_quant", "tf_dashboard"):
                 c.execute(text(f"DROP OWNED BY {role}"))
                 c.execute(text(f"DROP ROLE {role}"))

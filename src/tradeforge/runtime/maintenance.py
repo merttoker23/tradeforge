@@ -1,5 +1,6 @@
 """Bounded retention and disk/WAL admission; never deletes execution/risk history."""
 
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -46,18 +47,39 @@ class StorageBudget:
         return self.free_bytes >= FREE_LIMIT and self.wal_bytes < WAL_LIMIT
 
 
-def storage_budget(db: Database, *, volume_path: Path = Path("/postgres-volume")) -> StorageBudget:
+def database_volume() -> Path:
+    """The measured disk that admission trusts.
+
+    Compose mounts the PostgreSQL state volume at a fixed path. A co-located
+    local database has no such mount; its operator names the data directory
+    explicitly instead. An unset or missing volume never borrows another
+    disk's free space.
+    """
+    override = os.environ.get("TF_POSTGRES_VOLUME", "").strip()
+    return Path(override) if override else Path("/postgres-volume")
+
+
+def storage_budget(db: Database, *, volume_path: Path | None = None) -> StorageBudget:
+    if volume_path is None:
+        volume_path = database_volume()
     try:
         free = shutil.disk_usage(volume_path).free
     except OSError:
         return StorageBudget(0, DATABASE_LIMIT, WAL_LIMIT)
     with db.transaction() as c:
-        size = c.scalar(text("SELECT pg_database_size(current_database())"))
+        # This gauge is approximate. Walking every relation file for an
+        # exact size can time out and prevent the separate WAL/free-space
+        # checks that actually determine admission.
+        size = c.scalar(text("""
+            SELECT coalesce(sum(relpages::bigint),0)*current_setting('block_size')::bigint
+            FROM pg_catalog.pg_class
+            WHERE relkind IN ('r','i','t','m','S') AND NOT relisshared
+        """))
         wal = c.scalar(text("SELECT coalesce(sum(size),0) FROM pg_ls_waldir()"))
     return StorageBudget(int(free), int(size or 0), int(wal or 0))
 
 
-def storage_ready(db: Database, *, volume_path: Path = Path("/postgres-volume")) -> bool:
+def storage_ready(db: Database, *, volume_path: Path | None = None) -> bool:
     return storage_budget(db, volume_path=volume_path).ready
 
 
@@ -65,11 +87,11 @@ def observe_storage(db: Database) -> bool:
     from tradeforge.runtime.storage import save_runtime
 
     at = datetime.now(UTC)
-    ready = storage_ready(db)
     budget = storage_budget(db)
+    ready = budget.ready
     save_runtime(
         db,
-        "execution_guardian",
+        "execution_core",
         at,
         at + timedelta(seconds=30),
         {
@@ -91,7 +113,7 @@ def observation_admission(db: Database) -> bool:
         row = c.execute(
             text(
                 "SELECT observed_at,payload FROM runtime_observations "
-                "WHERE service='execution_guardian'"
+                "WHERE service='execution_core'"
             )
         ).first()
     try:
@@ -110,7 +132,7 @@ def observation_admission(db: Database) -> bool:
     )
 
 
-def retain(db: Database, *, volume_path: Path = Path("/postgres-volume")) -> None:
+def retain(db: Database, *, volume_path: Path | None = None) -> None:
     with db.transaction() as c:
         c.execute(text("SELECT retain_runtime_history()"))
     if not storage_ready(db, volume_path=volume_path):

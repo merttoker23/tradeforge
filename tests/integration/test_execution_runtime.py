@@ -12,29 +12,17 @@ from tests.execution_fixtures import FakeBroker, setup_execution
 from tests.integration.test_execution_orders import manager
 
 
-def test_local_guardian_health_reports_not_ready_without_private_stream(seeded):
-    from apps.execution_guardian.runtime import create_app
+def test_embedded_execution_rejects_unsafely_disabled_account_stream():
+    from tradeforge.runtime.auto_execution import execution_cycle
+    from types import SimpleNamespace
 
-    db, intent, context, at = setup_execution(seeded)
-    m = manager(db, FakeBroker(intent), context, at)
-
-    async def run():
-        runner = web.AppRunner(create_app(m, lambda: False), access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        try:
-            async with ClientSession() as session:
-                async with session.get(f"http://127.0.0.1:{port}/readiness") as r:
-                    assert r.status == 503
-                    body = await r.json()
-                    assert body["mode"] == "testnet" and body["live"] is False
-                    assert body["orders_enabled"] is False
-        finally:
-            await runner.cleanup()
-
-    asyncio.run(run())
+    results = []
+    recovery = SimpleNamespace(ready=False, reconcile=lambda: results.append("reconcile"))
+    stream = SimpleNamespace(ready=False, mark_recovered=lambda ready: results.append(ready))
+    worker = SimpleNamespace(run_once=lambda: results.append("DISPATCH"))
+    commands = SimpleNamespace(run_once=lambda *, ready: results.append(ready()))
+    execution_cycle(recovery, stream, worker, commands)
+    assert results == ["reconcile", False, False]
 
 
 def test_listen_key_renewal_failure_immediately_closes_stream_and_latches_halt(seeded):
@@ -152,31 +140,8 @@ def test_protective_algo_cancel_event_latches_entry_halt(seeded):
         assert c.scalar(text("SELECT kill_switch FROM risk_state")) is True
 
 
-def test_db_failure_keeps_liveness_but_readiness_returns_safe_503(seeded, monkeypatch):
-    from apps.execution_guardian.runtime import create_app
-    from tradeforge.persistence.db import EntryHalt
+def test_standalone_execution_http_surface_is_removed():
+    from tradeforge.runtime import auto_execution
 
-    db, intent, context, at = setup_execution(seeded)
-    m = manager(db, FakeBroker(intent), context, at)
-
-    def unavailable():
-        raise EntryHalt("DB_UNAVAILABLE")
-
-    monkeypatch.setattr(db, "probe", unavailable)
-
-    async def run():
-        runner = web.AppRunner(create_app(m, lambda: True), access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        try:
-            async with ClientSession() as session:
-                for path, status in [("/health", 200), ("/readiness", 503)]:
-                    async with session.get(f"http://127.0.0.1:{port}{path}") as response:
-                        assert response.status == status
-                        assert (await response.json())["orders_enabled"] is False
-        finally:
-            await runner.cleanup()
-
-    asyncio.run(run())
+    assert not hasattr(auto_execution, "create_app")
+    assert callable(auto_execution.serve)

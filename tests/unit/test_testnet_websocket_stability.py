@@ -90,8 +90,50 @@ def test_testnet_517_symbols_use_bounded_socket_groups():
     assert all(len({s.route for s in group}) == 1 for group in gateway.plan.groups)
 
 
+def test_full_depth_testnet_subscribes_each_eligible_pair():
+    gateway = MarketGateway(ClockSync(), environment="testnet", full_depth=True)
+    gateway.update_universe(_registry(517))
+    assert gateway.plan is not None
+    assert len(gateway.plan.groups) <= 32
+    assert max(map(len, gateway.plan.groups)) <= 100
+    assert not gateway.plan.omitted
+    assert gateway.canonical.books.keys() == gateway.eligible
+    names = {stream.name for group in gateway.plan.groups for stream in group}
+    for symbol in gateway.eligible:
+        assert {
+            f"{symbol.lower()}@{suffix}"
+            for suffix in ("depth20@500ms", "aggTrade", "kline_5m", "kline_15m")
+        } <= names
+
+
 def test_live_subscription_budget_unchanged():
     gateway = MarketGateway(ClockSync(), environment="live")
     gateway.update_universe(_registry(517))
     assert gateway.plan is not None
     assert [len(group) for group in gateway.plan.groups] == [2, 517]
+
+
+def test_local_depth_batches_rotate_without_dropping_broad_scan():
+    elapsed = [0.0]
+    gateway = MarketGateway(
+        ClockSync(), environment="testnet", full_depth=True, depth_batch_size=24,
+        monotonic=lambda: elapsed[0],
+    )
+    registry = _registry(517)
+    protected = ("TF0516USDT",)
+    gateway.update_universe(registry, deep=("TF0515USDT",), protected=protected)
+    first = set(gateway.canonical.books)
+    assert len(first) == 25
+    assert {"TF0515USDT", *protected} <= first
+    assert gateway.plan is not None
+    assert sum("@kline_15m" in s.name for g in gateway.plan.groups for s in g) == 517
+    elapsed[0] = 60.0
+    gateway.update_universe(registry, deep=("TF0515USDT",), protected=protected)
+    assert gateway.canonical.books.keys() == first
+    observed = set(first)
+    for _ in range(23):
+        elapsed[0] += 300.0
+        gateway.update_universe(registry, deep=("TF0515USDT",), protected=protected)
+        observed.update(gateway.canonical.books)
+        assert {"TF0515USDT", *protected} <= gateway.canonical.books.keys()
+    assert observed == gateway.eligible

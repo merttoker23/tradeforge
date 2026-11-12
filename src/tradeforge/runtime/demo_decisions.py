@@ -215,34 +215,54 @@ class DemoDecisions:
             now=at,
         )
 
-    def tick(self, feed: dict[str, Any]) -> None:
+    def tick(
+        self, feed: dict[str, Any], *, symbols: frozenset[str] | None = None,
+        pending: tuple[Record, ...] | None = None,
+    ) -> None:
         try:
-            self._tick(feed)
+            self._tick(feed, symbols=symbols, pending=pending)
         except EntryHalt as error:
             reason = str(error)
             self._note(reason if reason in ADMISSION_REASONS else "DEMO_ADMISSION_HALTED")
             raise
 
-    def _tick(self, feed: dict[str, Any]) -> None:
-        at = self.client.clock()
-        with self.db.transaction() as c:
-            rows = (
-                c.execute(
-                    text(
-                        "SELECT payload FROM (SELECT DISTINCT ON(decision_id) * "
-                        "FROM decision_lifecycle ORDER BY decision_id,version DESC) latest "
-                        "WHERE state IN ('ARMED','VALIDATING') ORDER BY at LIMIT 16"
-                    )
-                )
-                .scalars()
-                .all()
+    def pending(self, symbols: frozenset[str] | None) -> tuple[Record, ...]:
+        if symbols == frozenset():
+            return ()
+        query = (
+            "SELECT payload FROM (SELECT DISTINCT ON(decision_id) * "
+            "FROM decision_lifecycle ORDER BY decision_id,version DESC) latest "
+            "WHERE state IN ('ARMED','VALIDATING')"
+        )
+        parameters: dict[str, object] = {}
+        if symbols is not None:
+            query += (
+                " AND CAST(payload AS jsonb) #>> '{discovery,candidate,instrument,symbol}'"
+                " = ANY(:symbols)"
             )
-        self._candidate_count = len(rows)
-        if not rows:
+            parameters["symbols"] = sorted(symbols)
+        query += " ORDER BY at LIMIT 512"
+        with self.db.transaction() as c:
+            rows = c.execute(text(query), parameters).scalars().all()
+        return tuple(Record.model_validate_json(payload) for payload in rows)
+
+    def _tick(
+        self, feed: dict[str, Any], *, symbols: frozenset[str] | None = None,
+        pending: tuple[Record, ...] | None = None,
+    ) -> None:
+        at = self.client.clock()
+        if symbols == frozenset():
+            self._candidate_count = 0
+            self._note("NO_CHANGED_SYMBOLS")
+            return
+        records = self.pending(symbols) if pending is None else pending
+        self._candidate_count = len(records)
+        if not records:
             self._note("NO_ARMED_CANDIDATES")
-        for payload in rows:
-            record = Record.model_validate_json(payload)
+        for record in records:
             candidate = record.discovery.candidate
+            if symbols is not None and candidate.instrument.symbol not in symbols:
+                continue
             if candidate.expires_at <= at:
                 self._advance(record, DecisionState.EXPIRED)
                 self._note("CANDIDATE_EXPIRED")

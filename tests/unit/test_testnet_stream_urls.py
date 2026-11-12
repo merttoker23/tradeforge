@@ -9,9 +9,9 @@ from tradeforge.market.socket_manager import AiohttpConnector
 
 
 @pytest.mark.parametrize("route", ["public", "market"])
-def test_testnet_uses_demo_combined_stream(route):
+def test_testnet_uses_demo_category_route(route):
     connector = AiohttpConnector(base_url="https://demo-fstream.binance.com")
-    assert connector.stream_url(route) == "https://demo-fstream.binance.com/stream"
+    assert connector.stream_url(route) == f"https://demo-fstream.binance.com/{route}/stream"
 
 
 @pytest.mark.parametrize("route", ["public", "market"])
@@ -51,6 +51,6 @@ def test_testnet_open_passes_correct_endpoint_without_network():
 
     recorded = asyncio.run(scenario())
     assert [url for url, _ in recorded] == [
-        "https://demo-fstream.binance.com/stream",
-        "https://demo-fstream.binance.com/stream",
+        "https://demo-fstream.binance.com/market/stream",
+        "https://demo-fstream.binance.com/public/stream",
     ]
