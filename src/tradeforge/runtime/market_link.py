@@ -31,8 +31,11 @@ MAX_REQUEST_SYMBOLS = 512
 
 
 def memory_payload(
-    gateway: MarketGateway, persistence: GatewayPersistence, *,
-    quotes_only: bool = False, symbols: frozenset[str] | None = None,
+    gateway: MarketGateway,
+    persistence: GatewayPersistence,
+    *,
+    quotes_only: bool = False,
+    symbols: frozenset[str] | None = None,
     summary_only: bool = False,
 ) -> dict[str, Any]:
     at = gateway.clock()
@@ -45,9 +48,10 @@ def memory_payload(
             "clock_safe": safe,
             "eligible": sorted(gateway.eligible),
             "quotes": [
-            q.model_dump(mode="json") for q in persistence.display_quotes(at)
-            if symbols is None or q.symbol in symbols
-        ],
+                q.model_dump(mode="json")
+                for q in persistence.display_quotes(at)
+                if symbols is None or q.symbol in symbols
+            ],
         }
     markets = {
         m.symbol: m
@@ -77,10 +81,14 @@ def memory_payload(
             top = book.top_of_book(at)
             if top is not None:
                 stamp, bid, ask = top
-                book_rows.append({
-                    "symbol": symbol, "time": int(stamp.timestamp() * 1000),
-                    "bidPrice": str(bid), "askPrice": str(ask),
-                })
+                book_rows.append(
+                    {
+                        "symbol": symbol,
+                        "time": int(stamp.timestamp() * 1000),
+                        "bidPrice": str(bid),
+                        "askPrice": str(ask),
+                    }
+                )
     markets = {
         m.symbol: m
         for m in _merge_fresh(
@@ -150,18 +158,20 @@ def memory_payload(
         "status": status,
         "clock_safe": safe,
         "eligible": sorted(gateway.eligible),
-        "quotes": [] if summary_only else [
-            q.model_dump(mode="json") for q in persistence.display_quotes(at)
+        "quotes": []
+        if summary_only
+        else [
+            q.model_dump(mode="json")
+            for q in persistence.display_quotes(at)
             if symbols is None or q.symbol in symbols
         ],
         "markets": [
-            m.model_dump(mode="json") for m in markets.values()
+            m.model_dump(mode="json")
+            for m in markets.values()
             if symbols is None or m.symbol in symbols
         ],
         "deep": [r for r in deep if symbols is None or r["symbol"] in symbols],
-        "deep_status": [
-            r for r in deep_status if symbols is None or r["symbol"] in symbols
-        ],
+        "deep_status": [r for r in deep_status if symbols is None or r["symbol"] in symbols],
     }
 
 
@@ -174,9 +184,11 @@ def requested_symbols(request: web.Request) -> frozenset[str] | None:
     if "symbols" not in request.query:
         return None
     parts = request.query["symbols"].split(",")
-    if not 1 <= len(parts) <= MAX_REQUEST_SYMBOLS or any(
-        re.fullmatch(r"[A-Z0-9_]{2,40}", part) is None for part in parts
-    ) or len(parts) != len(set(parts)):
+    if (
+        not 1 <= len(parts) <= MAX_REQUEST_SYMBOLS
+        or any(re.fullmatch(r"[A-Z0-9_]{2,40}", part) is None for part in parts)
+        or len(parts) != len(set(parts))
+    ):
         raise web.HTTPBadRequest()
     return frozenset(parts)
 
@@ -237,7 +249,9 @@ def add_memory_route(
             )
         else:
             payload = memory_payload(
-                gateway, persistence, quotes_only=request.path == "/quote-state",
+                gateway,
+                persistence,
+                quotes_only=request.path == "/quote-state",
                 symbols=selected,
             )
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
@@ -283,7 +297,9 @@ def add_loopback_memory_route(
             )
         else:
             payload = memory_payload(
-                gateway, persistence, quotes_only=request.path == "/quote-state",
+                gateway,
+                persistence,
+                quotes_only=request.path == "/quote-state",
                 symbols=selected,
             )
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
@@ -375,7 +391,8 @@ def alpha_inputs(
             )
     deep = (
         [row for row in feed["deep"] if row.get("symbol") in symbols]
-        if symbols is not None else feed["deep"]
+        if symbols is not None
+        else feed["deep"]
     )
     if len(deep) > 2048:
         raise ValueError("MARKET_HANDOFF_CAPACITY")

@@ -116,7 +116,10 @@ def test_live_subscription_budget_unchanged():
 def test_local_depth_batches_rotate_without_dropping_broad_scan():
     elapsed = [0.0]
     gateway = MarketGateway(
-        ClockSync(), environment="testnet", full_depth=True, depth_batch_size=24,
+        ClockSync(),
+        environment="testnet",
+        full_depth=True,
+        depth_batch_size=24,
         monotonic=lambda: elapsed[0],
     )
     registry = _registry(517)

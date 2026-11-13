@@ -70,11 +70,13 @@ def storage_budget(db: Database, *, volume_path: Path | None = None) -> StorageB
         # This gauge is approximate. Walking every relation file for an
         # exact size can time out and prevent the separate WAL/free-space
         # checks that actually determine admission.
-        size = c.scalar(text("""
+        size = c.scalar(
+            text("""
             SELECT coalesce(sum(relpages::bigint),0)*current_setting('block_size')::bigint
             FROM pg_catalog.pg_class
             WHERE relkind IN ('r','i','t','m','S') AND NOT relisshared
-        """))
+        """)
+        )
         wal = c.scalar(text("SELECT coalesce(sum(size),0) FROM pg_ls_waldir()"))
     return StorageBudget(int(free), int(size or 0), int(wal or 0))
 

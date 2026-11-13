@@ -1,4 +1,5 @@
 """Fail-closed autonomous execution with no separate order service."""
+
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +11,31 @@ from tradeforge.runtime.auto_execution import execution_cycle, serve
 
 def test_execution_requires_explicit_testnet_and_trial():
     for environment, entries, trial in (
-        ("live", True, True), ("paper", True, True),
-        ("testnet", False, True), ("testnet", True, False),
+        ("live", True, True),
+        ("paper", True, True),
+        ("testnet", False, True),
+        ("testnet", True, False),
     ):
         with pytest.raises(ValueError, match="EXPLICIT_TESTNET_AUTO_EXECUTION_REQUIRED"):
-            asyncio.run(serve(None, SimpleNamespace(environment=environment),
-                              internal_token="not-used", enable_entries=entries,
-                              trial_enabled=trial))
+            asyncio.run(
+                serve(
+                    None,
+                    SimpleNamespace(environment=environment),
+                    internal_token="not-used",
+                    enable_entries=entries,
+                    trial_enabled=trial,
+                )
+            )
     with pytest.raises(ValueError, match="INTERNAL_MARKET_TOKEN_REQUIRED"):
-        asyncio.run(serve(None, SimpleNamespace(environment="testnet"),
-                          internal_token="", enable_entries=True, trial_enabled=True))
+        asyncio.run(
+            serve(
+                None,
+                SimpleNamespace(environment="testnet"),
+                internal_token="",
+                enable_entries=True,
+                trial_enabled=True,
+            )
+        )
 
 
 def test_no_outbox_dispatch_before_account_reconciliation():
@@ -27,11 +43,13 @@ def test_no_outbox_dispatch_before_account_reconciliation():
 
     class Recovery:
         ready = False
+
         def reconcile(self):
             calls.append("reconcile")
 
     class Stream:
         ready = True
+
         def mark_recovered(self, ready):
             calls.append(("mark", ready))
 
@@ -49,10 +67,10 @@ def test_no_outbox_dispatch_before_account_reconciliation():
 
 def test_old_service_not_in_deployment_or_dashboard():
     root = Path(__file__).resolve().parents[2]
-    compose = (root / "deploy/docker-compose.yml").read_text()
+    compose = (root / "deploy/docker-compose.yml").read_text(encoding="utf-8")
     assert "execution_guardian:" not in compose
     assert "TF_AUTO_ORDERS" in compose
     assert not (root / "apps/execution_guardian").exists()
-    html = (root / "src/tradeforge/dashboard/static/index.html").read_text()
+    html = (root / "src/tradeforge/dashboard/static/index.html").read_text(encoding="utf-8")
     assert "Manuel emir" not in html
     assert "execution-summary" in html

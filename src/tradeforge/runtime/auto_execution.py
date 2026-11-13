@@ -159,9 +159,9 @@ async def serve(
         storage_checked = float("-inf")
         storage_ok = False
         session = ClientSession(trust_env=False)
-        cursor, epoch = 0, ''
+        cursor, epoch = 0, ""
         wake_symbols: frozenset[str] | None = None
-        last_full_decision_scan = float('-inf')
+        last_full_decision_scan = float("-inf")
         try:
             while True:
                 started = time.monotonic()
@@ -243,7 +243,9 @@ async def serve(
                         if admitted:
                             progress.advance("DECISION_EVALUATION")
                             if selected_symbols is None or selected_symbols:
-                                pending = await asyncio.to_thread(decisions.pending, selected_symbols)
+                                pending = await asyncio.to_thread(
+                                    decisions.pending, selected_symbols
+                                )
                                 if pending:
                                     symbols = frozenset(
                                         record.discovery.candidate.instrument.symbol
@@ -358,18 +360,25 @@ async def serve(
                 if autonomous:
                     try:
                         packet = await fetch_market_events(
-                            session, internal_token,
-                            after=cursor, epoch=epoch, wait=2.0, base=gateway_base,
+                            session,
+                            internal_token,
+                            after=cursor,
+                            epoch=epoch,
+                            wait=2.0,
+                            base=gateway_base,
                         )
-                        cursor, epoch = int(packet['sequence']), str(packet['epoch'])
+                        cursor, epoch = int(packet["sequence"]), str(packet["epoch"])
                         wake_symbols = (
-                            None if packet['overflow'] or any(
-                                isinstance(event, dict) and event.get('kind') == 'FRAME'
-                                for event in packet['events']
+                            None
+                            if packet["overflow"]
+                            or any(
+                                isinstance(event, dict) and event.get("kind") == "FRAME"
+                                for event in packet["events"]
                             )
                             else frozenset(
-                                str(event['symbol']) for event in packet['events']
-                                if isinstance(event, dict) and 'symbol' in event
+                                str(event["symbol"])
+                                for event in packet["events"]
+                                if isinstance(event, dict) and "symbol" in event
                             )
                         )
                         # Coalesce bursts; prevent repeated expensive exchange
@@ -382,7 +391,7 @@ async def serve(
                         await asyncio.sleep(1.0)
                 else:
                     await asyncio.sleep(10)
-                progress.state['loop_lag_ms'] = round(
+                progress.state["loop_lag_ms"] = round(
                     max(0, time.monotonic() - started - 2) * 1000, 3
                 )
         finally:

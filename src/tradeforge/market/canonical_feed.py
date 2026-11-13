@@ -157,8 +157,12 @@ class CanonicalFeed:
         self._dirty = {pair for pair in self._dirty if pair[0] in unchanged}
 
     def socket_state(
-        self, streams: tuple[StreamSpec, ...], state: str, generation: int,
-        *, discard_flow: bool = False,
+        self,
+        streams: tuple[StreamSpec, ...],
+        state: str,
+        generation: int,
+        *,
+        discard_flow: bool = False,
     ) -> None:
         self._epoch += 1
         for stream in streams:
@@ -206,9 +210,7 @@ class CanonicalFeed:
                 interval = Timeframe(stream.name.split("_", 1)[1])
                 # A newly subscribed candle stream has no retained history.
                 self._need_repair(symbol, interval)
-                self.state.mark(
-                    self.keys[symbol], interval, DataQuality.MISSING, self.clock()
-                )
+                self.state.mark(self.keys[symbol], interval, DataQuality.MISSING, self.clock())
             elif "@depth" in stream.name and symbol in self.books:
                 book = self.books[symbol]
                 book.invalidate()
@@ -326,9 +328,11 @@ class CanonicalFeed:
         repairs = 0
         repairs_by_book = sorted(
             self._repair.items(),
-            key=lambda item: not (
-                item[0][0] in self.books
-                and self.books[item[0][0]].state_at(at) is StreamState.READY
+            key=lambda item: (
+                not (
+                    item[0][0] in self.books
+                    and self.books[item[0][0]].state_at(at) is StreamState.READY
+                )
             ),
         )
         for (symbol, tf), loss_version in repairs_by_book:
@@ -432,7 +436,9 @@ class CanonicalFeed:
     async def maintain_depth(self, recovery: Recovery) -> None:
         for symbol, book in tuple(self.books.items()):
             prefix = f"{symbol.lower()}@depth"
-            if book.state is StreamState.UNSYNCED and book.pending and any(
-                prefix + suffix in self._generations for suffix in ("@100ms", "", "@500ms")
+            if (
+                book.state is StreamState.UNSYNCED
+                and book.pending
+                and any(prefix + suffix in self._generations for suffix in ("@100ms", "", "@500ms"))
             ):
                 await recovery.depth(book)

@@ -39,7 +39,7 @@ def test_0007_existing_bar_backfill_keeps_evidence_immutable_after_0008(database
 
         migrate(db, "head")
         with db.transaction() as connection:
-            assert connection.scalar(text("SELECT version_num FROM schema_migrations")) == "0008"
+            assert connection.scalar(text("SELECT version_num FROM schema_migrations")) == "0009"
             assert (
                 connection.scalar(
                     text(

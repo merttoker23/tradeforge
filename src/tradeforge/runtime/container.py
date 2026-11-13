@@ -3,10 +3,8 @@
 import argparse
 import asyncio
 import hashlib
-import http.client
 import json
 import os
-import time
 from pathlib import Path
 
 from aiohttp import web
@@ -21,7 +19,7 @@ from tradeforge.persistence.db import Database
 from tradeforge.persistence.transactions import migrate
 from tradeforge.runtime.healthcheck import PORTS as PORTS
 from tradeforge.runtime.healthcheck import health
-from tradeforge.runtime.maintenance import observe_storage, retain
+from tradeforge.runtime.maintenance import retain
 from tradeforge.runtime.secrets import read_secret
 
 ROLES = ("market", "quant", "dashboard")

@@ -53,7 +53,11 @@ def test_handoff_builds_only_one_bounded_book_per_ready_symbol():
                 state_at=lambda at: StreamState.READY, snapshot=snapshot
             )
         },
-        flows={sample.instrument.symbol: SimpleNamespace(snapshot=lambda at: sample.flow)},
+        flows={
+            sample.instrument.symbol: SimpleNamespace(
+                validity_at=lambda at: sample.flow.validity, snapshot=lambda at: sample.flow
+            )
+        },
         symbol_ready=ready,
         storage_ready=True,
         admission_ready=True,

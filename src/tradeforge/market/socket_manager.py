@@ -178,7 +178,7 @@ async def pause(stop: asyncio.Event, seconds: float) -> None:
         pass
 
 
-def _discard(task: asyncio.Future) -> None:
+def _discard(task: asyncio.Task[WireFrame]) -> None:
     """Retrieve a finished transport task's outcome so it is never reported."""
     if not task.cancelled():
         task.exception()
@@ -355,7 +355,12 @@ class SocketManager:
                             pending = asyncio.ensure_future(ws.receive())
                             pending.add_done_callback(_discard)
                             if frame.kind == "CLOSE":
-                                raise StreamFailure(f"WS_DISCONNECTED_{frame.data}")
+                                detail = (
+                                    frame.data.decode("utf-8", "replace")
+                                    if isinstance(frame.data, bytes)
+                                    else frame.data
+                                )
+                                raise StreamFailure(f"WS_DISCONNECTED_{detail}")
                             if frame.kind == "PING":
                                 if not isinstance(frame.data, bytes):
                                     raise StreamFailure("WS_INVALID_PING")

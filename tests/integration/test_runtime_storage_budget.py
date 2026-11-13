@@ -30,9 +30,7 @@ def test_guardian_progress_preserves_independent_storage_measurement(migrated, m
     progress = RuntimeProgress(clock=lambda: clock[0])
     progress.advance("RECONCILIATION")
     at = clock[0]
-    save_runtime(
-        migrated, "execution_core", at, at + timedelta(seconds=15), progress.snapshot()
-    )
+    save_runtime(migrated, "execution_core", at, at + timedelta(seconds=15), progress.snapshot())
     assert observation_admission(migrated) is True
     with migrated.transaction() as c:
         payload = c.scalar(text("SELECT payload FROM runtime_observations"))

@@ -35,7 +35,7 @@ def test_demo_missing_is_explained_and_authenticated_snapshot_expires(migrated):
     result = ReadModel(migrated, clock=lambda: now).snapshot()
     assert result["demo_readiness"]["reason_codes"] == [
         "DEMO_PREFLIGHT_NOT_RUN",
-        "GUARDIAN_NOT_RUNNING",
+        "EXECUTION_NOT_RUNNING",
     ]
     state = dict(
         environment="BINANCE_FUTURES_DEMO",

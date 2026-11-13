@@ -23,9 +23,7 @@ def test_restart_preserves_pending_regime_confirmation(migrated, monkeypatch):
     restarted = QuantWorker(migrated, clock=lambda: following.as_of)
     restarted.detector = engine(cooldown=0)
     restarted.history = [
-        observation.current
-        for index in range(0, 5)
-        for observation in frame(index).observations
+        observation.current for index in range(0, 5) for observation in frame(index).observations
     ]
     monkeypatch.setattr(restarted, "_frame", lambda at: (following, "ANALYZED"))
 
@@ -46,9 +44,13 @@ def test_restart_does_not_count_same_period_revisions_as_confirmations(migrated)
     original = frame(4)
     for seconds in range(3):
         at = original.as_of + timedelta(seconds=seconds)
-        revised = MarketFrame.model_validate({
-            **original.model_dump(), "as_of": at, "observed_at": at,
-        })
+        revised = MarketFrame.model_validate(
+            {
+                **original.model_dump(),
+                "as_of": at,
+                "observed_at": at,
+            }
+        )
         writer._persist(deepcopy(detector).update(revised))
     restarted = QuantWorker(migrated, clock=lambda: at)
     restarted.detector = engine(cooldown=0)

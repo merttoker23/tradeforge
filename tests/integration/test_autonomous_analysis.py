@@ -61,14 +61,10 @@ def test_analysis_explains_each_symbol_strategy_and_side_without_raw_inputs(migr
     assert {r["side"] for r in rows} == {"LONG", "SHORT"}
     assert all(r["symbol"] == sample.instrument.symbol for r in rows)
     assert all(r["strategy"] == "MOMENTUM" for r in rows)
-    assert all(
-        r["state"] == "NO_TRADE" and r["reasons"] == ["DATA_UNAVAILABLE"]
-        for r in rows
-    )
+    assert all(r["state"] == "NO_TRADE" and r["reasons"] == ["DATA_UNAVAILABLE"] for r in rows)
     assert all(
         set(r)
-        <=
-        {
+        <= {
             "symbol",
             "side",
             "strategy",

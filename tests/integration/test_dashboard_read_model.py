@@ -60,7 +60,10 @@ def test_actual_automation_is_separate_from_dashboard_authority_and_expires(migr
     )
     model = ReadModel(migrated, clock=lambda: at)
     result = model.snapshot()
-    assert result["trading_authority"]["orders_enabled"] is False
+    # The browser session stays read-only. The embedded execution service owns
+    # the order authority, and the projection reports that server-side truth.
+    assert result["live"] is False
+    assert result["trading_authority"]["orders_enabled"] is True
     assert result["execution_readiness"]["ready"] is True
     assert result["execution_readiness"]["entries_enabled"] is True
     assert result["execution_readiness"]["trial_enabled"] is True
@@ -70,6 +73,7 @@ def test_actual_automation_is_separate_from_dashboard_authority_and_expires(migr
     expired = refresh_freshness(result, at + timedelta(seconds=16))
     assert expired["execution_readiness"]["ready"] is False
     assert expired["execution_readiness"]["reason"] == "DISPATCH_STALE"
+    assert expired["trading_authority"]["orders_enabled"] is False
 
 
 def test_completed_evaluation_remains_readable_after_worker_expiry(migrated):
@@ -337,14 +341,14 @@ def test_slow_snapshot_and_cached_observation_do_not_renew_freshness(migrated):
         )
     times = iter((at, at + timedelta(seconds=16)))
     slow = ReadModel(migrated, clock=lambda: next(times)).snapshot()
-    assert slow["sections"]["guardian"]["status"] == "STALE"
+    assert slow["sections"]["protection"]["status"] == "STALE"
     from tradeforge.dashboard.read_model import refresh_freshness
 
     frame = ReadModel(migrated, clock=lambda: at).snapshot()
-    assert frame["sections"]["guardian"]["status"] == "OK"
+    assert frame["sections"]["protection"]["status"] == "OK"
     aged = refresh_freshness(frame, at + timedelta(seconds=16))
-    assert aged["sections"]["guardian"]["status"] == "STALE"
-    assert frame["sections"]["guardian"]["status"] == "OK"  # immutable cached sample
+    assert aged["sections"]["protection"]["status"] == "STALE"
+    assert frame["sections"]["protection"]["status"] == "OK"  # immutable cached sample
 
 
 def test_worker_projection_preserves_stage_evidence_without_raw_payload(migrated):
@@ -455,10 +459,7 @@ def test_live_analysis_never_turns_feed_coverage_into_analyzed_pairs(migrated):
             "covered": 7,
             "measured": True,
             "clock_safe": True,
-            "coverage_deadlines": [
-                (at + timedelta(seconds=10)).isoformat()
-                for _ in range(7)
-            ],
+            "coverage_deadlines": [(at + timedelta(seconds=10)).isoformat() for _ in range(7)],
             "source_at": (at - timedelta(seconds=1)).isoformat(),
             "websocket_state": "CONNECTED",
             "received_events": 100,
@@ -499,7 +500,11 @@ def test_live_analysis_never_turns_feed_coverage_into_analyzed_pairs(migrated):
     ],
 )
 def test_live_analysis_distinguishes_closed_bar_wait_from_stale_worker_or_source(
-    worker_reason, ready, source_age, heartbeat_ttl, expected,
+    worker_reason,
+    ready,
+    source_age,
+    heartbeat_ttl,
+    expected,
 ):
     from tradeforge.dashboard.read_model import refresh_freshness
 
@@ -515,7 +520,8 @@ def test_live_analysis_distinguishes_closed_bar_wait_from_stale_worker_or_source
         "reason": worker_reason,
         "last_analysis_at": (at - timedelta(seconds=90)).isoformat() if ready else None,
         "last_source_at": (at - timedelta(seconds=source_age)).isoformat()
-        if source_age is not None else None,
+        if source_age is not None
+        else None,
     }
 
     snapshot = refresh_freshness({"sections": {"workers": {"data": [worker]}}}, at)
@@ -538,10 +544,7 @@ def test_live_analysis_projects_real_engine_totals_and_evaluated_pairs(migrated)
             "covered": 10,
             "measured": True,
             "clock_safe": True,
-            "coverage_deadlines": [
-                (at + timedelta(seconds=10)).isoformat()
-                for _ in range(10)
-            ],
+            "coverage_deadlines": [(at + timedelta(seconds=10)).isoformat() for _ in range(10)],
             "source_at": (at - timedelta(seconds=1)).isoformat(),
             "websocket_state": "CONNECTED",
             "received_events": 500,

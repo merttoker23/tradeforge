@@ -118,7 +118,8 @@ def select_binance_master(inline: str | None, private_file: Path | None) -> str 
         raise ValueError("BINANCE_MASTER_AMBIGUOUS")
     if private_file is not None:
         master = (
-            local_token_file(private_file) if os.name == "nt"
+            local_token_file(private_file)
+            if os.name == "nt"
             else read_secret(private_file, maximum=4096)
         )
         if len(master) < 32:

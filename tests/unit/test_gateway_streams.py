@@ -118,9 +118,7 @@ def test_source_staleness_duplicate_keys_and_mixed_market():
         )
     # A clock that is trusted within a skew may not reject every event of
     # that stream. The tolerance must match the declared clock policy.
-    future = decode(
-        [ticker(E=MS + 2000)], eligible=frozenset({"BTCUSDT"}), max_future=3
-    )
+    future = decode([ticker(E=MS + 2000)], eligible=frozenset({"BTCUSDT"}), max_future=3)
     assert len(future) == 1
     with pytest.raises(ValueError):
         decode([ticker(E=MS + 2000)], eligible=frozenset({"BTCUSDT"}))

@@ -20,7 +20,7 @@ from tradeforge.runtime.demo_decisions import DemoDecisions
 def test_known_trial_admission_reasons_are_preserved_without_changing_halt(monkeypatch, code):
     decisions = DemoDecisions(None, SimpleNamespace())
 
-    def halted(feed, *, symbols=None):
+    def halted(feed, *, symbols=None, pending=None):
         raise EntryHalt(code)
 
     monkeypatch.setattr(decisions, "_tick", halted)
@@ -34,7 +34,7 @@ def test_known_trial_admission_reasons_are_preserved_without_changing_halt(monke
 def test_unrecognized_admission_exception_is_redacted_and_still_halts(monkeypatch):
     decisions = DemoDecisions(None, SimpleNamespace())
 
-    def halted(feed, *, symbols=None):
+    def halted(feed, *, symbols=None, pending=None):
         raise EntryHalt("operator-token=private-value")
 
     monkeypatch.setattr(decisions, "_tick", halted)

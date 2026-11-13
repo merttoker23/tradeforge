@@ -157,7 +157,9 @@ async def serve(
         database.pin_environment(active.revision)
     gateway = MarketGateway(
         ClockSync(max_rtt=5.0, max_skew=3.0),
-        environment=active.name, full_depth=full_depth, depth_batch_size=depth_batch_size,
+        environment=active.name,
+        full_depth=full_depth,
+        depth_batch_size=depth_batch_size,
     )
     refresher = UniverseRefresher(
         InstrumentRegistry(database),
@@ -176,6 +178,7 @@ async def serve(
     app = create_app(gateway, chart_demand=persistence.request_chart)
     from tradeforge.runtime.event_handoff import MarketEventHub, add_market_events_route
     from tradeforge.runtime.market_link import add_loopback_memory_route, add_memory_route
+
     market_events = MarketEventHub()
 
     if internal_token is None:
@@ -324,11 +327,13 @@ def main() -> int:
     )
     parser.add_argument("--port", type=int, default=8101)
     parser.add_argument(
-        "--full-depth", action="store_true",
+        "--full-depth",
+        action="store_true",
         help="Subscribe every eligible pair to the strategy evidence streams",
     )
     parser.add_argument(
-        "--depth-batch-size", type=int,
+        "--depth-batch-size",
+        type=int,
         help="Rotate strategy subscriptions in batches while scanning the entire universe",
     )
     parser.add_argument(
@@ -375,8 +380,13 @@ def main() -> int:
     try:
         asyncio.run(
             serve(
-                database, args.port, watched=tuple(args.watch), deep=tuple(args.deep),
-                internal_token=token, loopback=True, full_depth=args.full_depth,
+                database,
+                args.port,
+                watched=tuple(args.watch),
+                deep=tuple(args.deep),
+                internal_token=token,
+                loopback=True,
+                full_depth=args.full_depth,
                 depth_batch_size=args.depth_batch_size,
             )
         )

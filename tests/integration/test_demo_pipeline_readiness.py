@@ -160,12 +160,21 @@ class OfflineBinanceTransport:
         price = D(target["triggerPrice"])
         gross = (price - self.ask) * self.filled
         assert gross > 0
-        self.exit_rows.append({
-            "symbol": "ETHUSDT", "orderId": 4202, "id": 703, "side": "SELL",
-            "qty": str(self.filled), "price": str(price), "realizedPnl": str(gross),
-            "commission": "0.001", "commissionAsset": "USDT", "maker": False,
-            "time": self.milliseconds,
-        })
+        self.exit_rows.append(
+            {
+                "symbol": "ETHUSDT",
+                "orderId": 4202,
+                "id": 703,
+                "side": "SELL",
+                "qty": str(self.filled),
+                "price": str(price),
+                "realizedPnl": str(gross),
+                "commission": "0.001",
+                "commissionAsset": "USDT",
+                "maker": False,
+                "time": self.milliseconds,
+            }
+        )
         return gross
 
     def __call__(self, method, path, encoded, headers):
@@ -517,9 +526,11 @@ def test_offline_real_alpha_trial_publishes_then_fills_and_protects_once(migrate
     settle_closed_results(migrated, pipeline.client)
     with migrated.transaction() as c:
         assert c.scalar(text("SELECT qty=0 AND protected_qty=0 FROM positions"))
-        protectors = dict(c.execute(text(
-            "SELECT split_part(client_order_id,'_',1),status FROM protective_orders"
-        )).all())
+        protectors = dict(
+            c.execute(
+                text("SELECT split_part(client_order_id,'_',1),status FROM protective_orders")
+            ).all()
+        )
         assert protectors == {"sl": "CANCELED", "tp": "FINISHED"}
     results = pipeline.events("runtime.closed_result.v1")
     assert len(results) == 1 and D(results[0]["pnl"]) == gross - D("0.003")

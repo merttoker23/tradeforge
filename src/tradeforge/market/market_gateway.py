@@ -41,6 +41,8 @@ class MarketGateway:
         self._depth_batch: tuple[str, ...] = ()
         self._depth_offset = 0
         self._depth_rotation_at = float("-inf")
+        self._watched_tier: tuple[str, ...] = ()
+        self._deep_tier: tuple[str, ...] = ()
         if not 0 < stale_after <= 60:
             raise ValueError("INVALID_STREAM_TTL")
         self.clock_sync, self.clock, self.monotonic = clock_sync, clock, monotonic
@@ -104,9 +106,11 @@ class MarketGateway:
         if members != self.eligible or now >= self._depth_rotation_at:
             if members != self.eligible:
                 self._depth_offset = 0
-            priority = tuple(dict.fromkeys(
-                symbol for symbol in (*ranked, "BTCUSDT", "ETHUSDT") if symbol in members
-            ))[:min(4, self.depth_batch_size // 2)]
+            priority = tuple(
+                dict.fromkeys(
+                    symbol for symbol in (*ranked, "BTCUSDT", "ETHUSDT") if symbol in members
+                )
+            )[: min(4, self.depth_batch_size // 2)]
             others = sorted(members.difference(priority, protected))
             start = self._depth_offset % len(others) if others else 0
             count = self.depth_batch_size - len(priority)
@@ -157,14 +161,16 @@ class MarketGateway:
             # retained streams keep their generation, their latest observation
             # and their queued events; the connection is not restarted, so no
             # evidence is lost and no repair sweep is triggered.
-            old_names = {
-                s.name for group in (self.plan.groups if self.plan else ()) for s in group
-            }
+            old_names = {s.name for group in (self.plan.groups if self.plan else ()) for s in group}
             new_names = {s.name for group in new_plan.groups for s in group}
             retained = old_names & new_names
             self._generations = {n: g for n, g in self._generations.items() if n in retained}
             self._latest = {k: v for k, v in self._latest.items() if k[0] in retained}
         self.eligible, self.plan = members, new_plan
+        # The tiers are recorded explicitly. A stream name cannot identify a
+        # tier on its own: the deep tier also carries the 5m setup bar.
+        self._watched_tier = tuple(sorted(set(watched)))
+        self._deep_tier = tuple(sorted(set(deep)))
         selected = {s.symbol for group in new_plan.groups for s in group if s.symbol}
         deep_symbols = {s.symbol for group in new_plan.groups for s in group if "@depth" in s.name}
         self.canonical.configure(
@@ -180,8 +186,12 @@ class MarketGateway:
         )
 
     def socket_state(
-        self, streams: tuple[StreamSpec, ...], state: str, generation: int,
-        *, discard_flow: bool = False,
+        self,
+        streams: tuple[StreamSpec, ...],
+        state: str,
+        generation: int,
+        *,
+        discard_flow: bool = False,
     ) -> None:
         self.canonical.socket_state(streams, state, generation, discard_flow=discard_flow)
         for stream in streams:
@@ -221,7 +231,8 @@ class MarketGateway:
         """
         for stream in removed:
             self._generations.pop(stream.name, None)
-            self._latest.pop((stream.name, stream.symbol), None)
+            if stream.symbol is not None:
+                self._latest.pop((stream.name, stream.symbol), None)
         for stream in added:
             self._generations[stream.name] = generation
         self.canonical.socket_streams(added, removed, generation)
@@ -396,16 +407,11 @@ class MarketGateway:
             "socket_failures": self.socket_failures + self.active_socket_failures,
             "socket_reason": self.last_socket_reason,
             "global_fresh": {
-                name: sum(
-                    1
-                    for symbol in self.eligible
-                    if self.fresh(name, symbol)
-                )
+                name: sum(1 for symbol in self.eligible if self.fresh(name, symbol))
                 for name in GLOBAL_STREAMS
             },
             "deep_flow": {
-                symbol: flow.validity_at(now).value
-                for symbol, flow in self.canonical.flows.items()
+                symbol: flow.validity_at(now).value for symbol, flow in self.canonical.flows.items()
             },
             "quote_attempts": self.quote_attempts,
             "quote_failures": self.quote_failures,
@@ -487,26 +493,8 @@ class MarketGateway:
             universe_version=observation.version_hash if observation else None,
             clock_safe=self.clock_sync.ready(now, self.monotonic()),
             source_at=min(e.event_time for e in events).isoformat() if events else None,
-            watched=sorted(
-                {
-                    s.symbol
-                    for group in self.plan.groups
-                    for s in group
-                    if s.symbol is not None and "@kline_5m" in s.name
-                }
-            )
-            if self.plan
-            else [],
-            deep=sorted(
-                {
-                    s.symbol
-                    for group in self.plan.groups
-                    for s in group
-                    if s.symbol is not None and "@depth" in s.name
-                }
-            )
-            if self.plan
-            else [],
+            watched=list(self._watched_tier),
+            deep=list(self._deep_tier),
             protected=sorted(self.plan.protected) if self.plan else [],
         )
         return sample, deadline
@@ -528,10 +516,12 @@ class MarketGateway:
         Consumers must be nonblocking. Canonical memory is updated here; its
         recovery and persistence worker runs separately from market ingestion.
         """
-        managers: dict[
-            tuple[StreamSpec, ...], tuple[asyncio.Task[None], asyncio.Event, SocketManager]
-        ] = {}
-        tokens: dict[tuple[StreamSpec, ...], int] = {}
+        # A socket group is identified by its anchor stream, not by its exact
+        # composition. The composition changes on a discretionary rebalance,
+        # but the connection and its retained evidence must survive it.
+        managers: dict[str, tuple[asyncio.Task[None], asyncio.Event, SocketManager]] = {}
+        tokens: dict[str, int] = {}
+        active: dict[str, tuple[StreamSpec, ...]] = {}
         current_plan: SubscriptionPlan | None = None
 
         async def sync_clock() -> None:
@@ -582,9 +572,7 @@ class MarketGateway:
                         # not folded into the watch tier: a one-minute candle
                         # stream would make the deep readiness depend on
                         # intraday candles the alpha engine never reads.
-                        watched=tuple(
-                            s for s in dict.fromkeys(chosen_watch) if s in available
-                        ),
+                        watched=tuple(s for s in dict.fromkeys(chosen_watch) if s in available),
                         deep=tuple(s for s in dict.fromkeys(chosen_deep) if s in available),
                         protected=tuple(s for s in protected if s in available),
                     )
@@ -607,10 +595,12 @@ class MarketGateway:
                             # The group's composition changed. The retained
                             # streams keep their subscription, so their book,
                             # flow and candle evidence survive the rebalance.
+                            active[key] = planned[key]
                             managers[key][2].update(planned[key])
                             continue
                         task, group_stop, manager = managers.pop(key)
                         tokens.pop(key, None)  # Fence before cancellation can run callbacks.
+                        active.pop(key, None)
                         group_stop.set()
                         task.cancel()
                         retiring.append(task)
@@ -624,6 +614,7 @@ class MarketGateway:
                                 continue
                             self._epoch += 1
                             tokens[key] = self._epoch
+                            active[key] = group
 
                             def state(
                                 value: str,
@@ -631,8 +622,9 @@ class MarketGateway:
                                 key: str = key,
                                 expected_epoch: int = self._epoch,
                             ) -> None:
-                                if tokens.get(key) == expected_epoch:
-                                    self.socket_state(planned[key], value, generation)
+                                streams = active.get(key)
+                                if streams is not None and tokens.get(key) == expected_epoch:
+                                    self.socket_state(streams, value, generation)
 
                             def event(
                                 value: MarketEvent,

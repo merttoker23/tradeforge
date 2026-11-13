@@ -14,16 +14,27 @@ STATIC = ROOT / "src/tradeforge/dashboard/static"
 
 
 async def account_and_routes(monkeypatch, *, environment="testnet", master="valid"):
-    monkeypatch.setattr(demo_operator, "select_environment", lambda db: SimpleNamespace(name=environment))
-    monkeypatch.setattr(demo_operator, "_read_account", lambda *args: {
-        "environment": "BINANCE_FUTURES_DEMO", "as_of": "2026-10-22T00:00:00Z",
-        "equity": "1000", "available_balance": "1000", "position_count": 0,
-    })
+    monkeypatch.setattr(
+        demo_operator, "select_environment", lambda db: SimpleNamespace(name=environment)
+    )
+    monkeypatch.setattr(
+        demo_operator,
+        "_read_account",
+        lambda *args: {
+            "environment": "BINANCE_FUTURES_DEMO",
+            "as_of": "2026-10-22T00:00:00Z",
+            "equity": "1000",
+            "available_balance": "1000",
+            "position_count": 0,
+        },
+    )
     monkeypatch.setattr(demo_operator, "_audit", lambda *args: None)
     app = web.Application()
 
     async def home(request):
-        return web.Response(text="<html><head></head><body></body></html>", content_type="text/html")
+        return web.Response(
+            text="<html><head></head><body></body></html>", content_type="text/html"
+        )
 
     app.router.add_get("/", home)
     demo_operator.attach_demo_operator(app, object(), master)

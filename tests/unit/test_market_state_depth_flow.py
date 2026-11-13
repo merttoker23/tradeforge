@@ -63,15 +63,20 @@ def snapshot(last=100):
 def test_partial_depth_frames_replace_the_book_without_a_rest_snapshot():
     book = LocalOrderBook(instrument())
     book.begin(1)
-    assert book.ingest(event(
-        "depth20@500ms", last=101, bids=[["100", "3"]], asks=[["102", "5"]]
-    ))
+    assert book.ingest(event("depth20@500ms", last=101, bids=[["100", "3"]], asks=[["102", "5"]]))
     first = book.snapshot(START + timedelta(seconds=1))
     assert first.stream_state is StreamState.READY
-    assert book.ingest(event(
-        "depth20@500ms", first=105, last=106, previous=104, second=2,
-        bids=[["99", "2"]], asks=[["103", "4"]],
-    ))
+    assert book.ingest(
+        event(
+            "depth20@500ms",
+            first=105,
+            last=106,
+            previous=104,
+            second=2,
+            bids=[["99", "2"]],
+            asks=[["103", "4"]],
+        )
+    )
     second = book.snapshot(START + timedelta(seconds=2))
     assert second.stream_state is StreamState.READY
     assert second.bids == ((Decimal("99"), Decimal("2")),)

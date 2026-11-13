@@ -76,8 +76,8 @@ def test_failed_refresh_revokes_prior_proof(seeded):
 def test_serve_keeps_reconciling_while_market_handoff_is_blocked(seeded, monkeypatch):
     import asyncio
 
-    from tradeforge.runtime import auto_execution as runtime
     from tradeforge.execution.private_stream import PrivateStream
+    from tradeforge.runtime import auto_execution as runtime
     from tradeforge.runtime import market_link
 
     db, _, client, _, _ = prepared(seeded)
@@ -109,7 +109,9 @@ def test_serve_keeps_reconciling_while_market_handoff_is_blocked(seeded, monkeyp
         monkeypatch.setattr(runtime, "protection_loop", fast_protection)
         monkeypatch.setattr(market_link, "fetch_memory", handoff)
         service = asyncio.create_task(
-            runtime.serve(db, client, internal_token="offline-test", enable_entries=True, trial_enabled=True)
+            runtime.serve(
+                db, client, internal_token="offline-test", enable_entries=True, trial_enabled=True
+            )
         )
         try:
             await asyncio.wait_for(entered.wait(), 10)

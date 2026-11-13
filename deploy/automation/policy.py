@@ -12,6 +12,9 @@ REVIEWED_MIGRATIONS = {
         "7a31ec112a4a3fb45514003cbd8683f7452a5e62428a08bf53052ec82b49ee67"
     ),
     "0008_bounded_memory.py": ("f35ff086272e4d2652898efcbaccc4726d77b0f8839fb3495b6c734e9ed9068e"),
+    "0009_embedded_execution.py": (
+        "cc185bc5719d7b51344553dc8155e4b3522ec9fde6e30745d3ce30666b64387c"
+    ),
 }
 IMAGE = "ghcr.io/" + REPOSITORY
 AUDIENCE = "https://forgetrade.tech/_tradeforge/deploy"

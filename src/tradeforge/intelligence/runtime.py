@@ -79,9 +79,7 @@ ANALYSIS_COUNTERS = (
 )
 
 
-def frame_coverage(
-    observations: tuple[MarketObservation, ...], eligible: tuple[Any, ...]
-) -> float:
+def frame_coverage(observations: tuple[MarketObservation, ...], eligible: tuple[Any, ...]) -> float:
     """Share of the eligible universe measured on the frame's closed period."""
     return len(observations) / len(eligible) if eligible else 0.0
 
@@ -365,9 +363,7 @@ class QuantWorker:
             # revised, or backfilled evidence arrived and we must reload the
             # bounded window. When the count is unchanged, only an incremental
             # probe for recently observed revisions is needed.
-            window_start = now - timedelta(
-                seconds=timeframe.seconds * (self._history_limit + 1)
-            )
+            window_start = now - timedelta(seconds=timeframe.seconds * (self._history_limit + 1))
             live_count = c.execute(
                 COUNT_PROBE,
                 {
@@ -494,6 +490,11 @@ class QuantWorker:
             current_coverage >= self.detector.policy.minimum_coverage
         )
         self.history_metrics["gateway_history_incomplete"] = sweep_incomplete
+        if sweep_incomplete and current_members == 0:
+            # The gateway is still sweeping the current period and no member
+            # has delivered it yet. An older complete period must not be
+            # published as if it were the current measurement.
+            return None, "WAITING_HISTORY_SWEEP"
         closed = max((b.close_at for bars in series.values() for b in bars), default=None)
         if closed is None:
             return None, "CLOSED_BARS_MISSING"
@@ -572,7 +573,7 @@ class QuantWorker:
                     self.rebuild_current = True
             if not self.rebuild_current:
                 return None, "WAITING_CLOSED_BAR"
-        observations = []
+        observations: list[MarketObservation] = []
         for bars in series.values():
             bars.sort(key=lambda b: b.open_at)
             bars = bars[-2:]
@@ -598,10 +599,11 @@ class QuantWorker:
             )
         if not observations:
             return None, "CONTIGUOUS_BARS_MISSING"
-        coverage = frame_coverage(observations, universe.eligible)
-        self.history_metrics["history_frame_members"] = len(observations)
+        frame_observations = tuple(observations)
+        coverage = frame_coverage(frame_observations, universe.eligible)
+        self.history_metrics["history_frame_members"] = len(frame_observations)
         self.history_metrics["history_frame_coverage"] = coverage
-        block = publish_block(observations, universe.eligible, self.detector.policy)
+        block = publish_block(frame_observations, universe.eligible, self.detector.policy)
         if block is not None:
             return None, block
         frame = MarketFrame(

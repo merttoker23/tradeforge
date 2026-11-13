@@ -186,11 +186,7 @@ class LocalOrderBook:
             self.invalidate()
             self.pending.append(event)
             return False
-        if (
-            not bridge
-            and self._event_at is not None
-            and event.event_time < self._event_at
-        ):
+        if not bridge and self._event_at is not None and event.event_time < self._event_at:
             self.invalidate()
             return False
         for current, wire in ((self.bids, "b"), (self.asks, "a")):

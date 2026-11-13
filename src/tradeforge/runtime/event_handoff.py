@@ -104,9 +104,7 @@ class MarketEventHub:
     def _emit(self, symbol: str, kind: str, now: float) -> None:
         self.last_wakeup[("*" if kind == "FRAME" else symbol), kind] = now
         if len(self.last_wakeup) > 10000:
-            self.last_wakeup = {
-                k: v for k, v in self.last_wakeup.items() if now - v < 120
-            }
+            self.last_wakeup = {k: v for k, v in self.last_wakeup.items() if now - v < 120}
         self.sequence += 1
         self.entries.append(MarketWakeup(self.sequence, symbol, kind))
         self.changed.set()
@@ -166,9 +164,7 @@ def add_market_events_route(
         if token is not None:
             valid = (
                 len(request.headers.getall("Authorization", [])) == 1
-                and hmac.compare_digest(
-                    request.headers.get("Authorization", ""), "Bearer " + token
-                )
+                and hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)
                 and "Origin" not in request.headers
                 and "Sec-Fetch-Site" not in request.headers
             )
@@ -177,8 +173,10 @@ def add_market_events_route(
             peer = transport.get_extra_info("peername") if transport else None
             bound = transport.get_extra_info("sockname") if transport else None
             valid = bool(
-                peer and peer[0] == "127.0.0.1"
-                and bound and bound[0] == "127.0.0.1"
+                peer
+                and peer[0] == "127.0.0.1"
+                and bound
+                and bound[0] == "127.0.0.1"
                 and request.host == f"127.0.0.1:{bound[1]}"
                 and "Origin" not in request.headers
                 and "Sec-Fetch-Site" not in request.headers

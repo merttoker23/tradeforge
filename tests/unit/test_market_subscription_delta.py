@@ -2,13 +2,8 @@
 
 import asyncio
 import json
-from datetime import timedelta
-
-import pytest
 
 from tests.market_fixtures import START, instrument
-from tradeforge.domain.common import DataQuality
-from tradeforge.domain.market import StreamState, Timeframe
 from tradeforge.market.canonical_feed import CanonicalFeed
 from tradeforge.market.socket_manager import SocketManager, WireFrame
 from tradeforge.market.streams import StreamSpec
@@ -56,9 +51,7 @@ def test_live_delta_subscribes_and_unsubscribes_without_reconnecting():
         )
         task = asyncio.create_task(manager.run(stop))
         await asyncio.sleep(0.05)
-        manager.update(
-            (StreamSpec("btcusdt@kline_15m"), StreamSpec("ethusdt@aggTrade"))
-        )
+        manager.update((StreamSpec("btcusdt@kline_15m"), StreamSpec("ethusdt@aggTrade")))
         await asyncio.sleep(0.4)
         stop.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -132,14 +125,24 @@ def test_invalid_pair_does_not_disconnect_valid_peer():
             WireFrame("TEXT", json.dumps({"id": 1, "result": None})),
             WireFrame("TEXT", json.dumps({"stream": btc.name, "data": {}})),
             WireFrame("TEXT", json.dumps({"stream": btc.name, "data": {}})),
-            WireFrame("TEXT", json.dumps({
-                "stream": eth.name,
-                "data": {
-                    "e": "bookTicker", "s": "ETHUSDT", "u": 1,
-                    "E": int(START.timestamp() * 1000),
-                    "b": "10", "a": "11", "B": "1", "A": "1",
-                },
-            })),
+            WireFrame(
+                "TEXT",
+                json.dumps(
+                    {
+                        "stream": eth.name,
+                        "data": {
+                            "e": "bookTicker",
+                            "s": "ETHUSDT",
+                            "u": 1,
+                            "E": int(START.timestamp() * 1000),
+                            "b": "10",
+                            "a": "11",
+                            "B": "1",
+                            "A": "1",
+                        },
+                    }
+                ),
+            ),
         ]
 
         def accept(event):
@@ -147,9 +150,11 @@ def test_invalid_pair_does_not_disconnect_valid_peer():
             stop.set()
 
         manager = SocketManager(
-            (btc, eth), connector([], frames),
+            (btc, eth),
+            connector([], frames),
             eligible=lambda: frozenset({"BTCUSDT", "ETHUSDT"}),
-            on_event=accept, on_state=lambda *_: None,
+            on_event=accept,
+            on_state=lambda *_: None,
             on_invalid_stream=lambda stream, generation: invalid.append((stream, generation)),
             clock=lambda: START,
         )
@@ -178,9 +183,7 @@ def test_canonical_delta_keeps_the_retained_book_and_flow():
 
     # A newly selected symbol starts a fresh local book and flow.
     feed.configure((instrument(), instrument("ETHUSDT")), ("BTCUSDT", "ETHUSDT"))
-    feed.socket_streams(
-        (StreamSpec("ethusdt@depth"), StreamSpec("ethusdt@aggTrade")), (), 2
-    )
+    feed.socket_streams((StreamSpec("ethusdt@depth"), StreamSpec("ethusdt@aggTrade")), (), 2)
     assert feed.books["ETHUSDT"].generation > 0
     assert feed.flows["ETHUSDT"].generation > 0
     assert feed.books["BTCUSDT"] is book
@@ -194,3 +197,17 @@ def test_removed_stream_loses_its_generation():
     assert "btcusdt@aggTrade" in feed._generations
     feed.socket_streams((), (StreamSpec("btcusdt@aggTrade"),), 1)
     assert "btcusdt@aggTrade" not in feed._generations
+
+
+def test_socket_group_identity_is_its_anchor_stream():
+    """A group's identity survives a change of its composition."""
+    from tradeforge.market.market_gateway import MarketGateway
+
+    anchor = (StreamSpec("!ticker@arr"), StreamSpec("btcusdt@kline_15m"))
+    assert MarketGateway._group_key(anchor) == "!ticker@arr"
+    # The same anchor with a different composition is still the same group.
+    extended = (*anchor, StreamSpec("ethusdt@aggTrade"))
+    assert MarketGateway._group_key(extended) == MarketGateway._group_key(anchor)
+    # A different anchor is a different group and must not reuse its socket.
+    other = (StreamSpec("ethusdt@kline_15m"),)
+    assert MarketGateway._group_key(other) != MarketGateway._group_key(anchor)

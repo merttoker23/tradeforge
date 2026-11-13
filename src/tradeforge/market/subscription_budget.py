@@ -144,7 +144,7 @@ class MarketQueue:
 
     def discard_stream(self, stream: StreamSpec) -> None:
         for priority, queue in enumerate(self._queues):
-            retained = deque()
+            retained: deque[QueuedMarket] = deque()
             for item in queue:
                 if item.event.stream == stream:
                     self.byte_size -= item.size

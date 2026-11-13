@@ -37,7 +37,7 @@ def test_stream_coverage_requires_current_measured_matching_universe(migrated):
     assert result["sections"]["streams"]["status"] == "OK"
     assert result["trading_authority"]["status"] == "NOT_READY"
     assert result["sections"]["risk"]["status"] == "UNKNOWN"
-    assert result["sections"]["guardian"]["status"] == "UNKNOWN"
+    assert result["sections"]["protection"]["status"] == "UNKNOWN"
     aged = refresh_freshness(result, now + timedelta(seconds=16))
     assert aged["sections"]["streams"]["status"] == "STALE"
     assert aged["sections"]["universe"]["data"][0]["stream_coverage"] is None
@@ -49,8 +49,10 @@ def test_stream_coverage_requires_current_measured_matching_universe(migrated):
         {**base, "covered": 0, "coverage_deadlines": []},
     )
     partial = ReadModel(migrated, clock=lambda: now + timedelta(seconds=1)).snapshot()
-    assert partial["sections"]["streams"]["status"] == "DEGRADED"
-    assert partial["sections"]["universe"]["data"][0]["stream_coverage"] == 0.0
+    # Zero covered symbols is not partial coverage. No usable evidence exists,
+    # so the status stays unknown and no numeric coverage is claimed.
+    assert partial["sections"]["streams"]["status"] == "UNKNOWN"
+    assert partial["sections"]["universe"]["data"][0]["stream_coverage"] is None
     registry.record(
         payload(symbol(), symbol("ETHUSDT")), now + timedelta(seconds=1), timedelta(hours=1)
     )

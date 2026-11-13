@@ -236,34 +236,34 @@ function overviewStrategies(row,label){return row.strategy?label(row.strategy):(
 function localTime(at){const stamp=Date.parse(at);return Number.isFinite(stamp)?new Date(stamp).toLocaleTimeString("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit",second:"2-digit"})+" TRT":"—";}
 
 function renderOverview(data){
-  overviewData=data;const live=data.live_analysis||null,engine=live?.engine||{},pairs=live?.pairs||{},sections=data.sections||{};
+  overviewData=data;const live=data.live_analysis||null,analysisEngine=live?.engine||{},pairs=live?.pairs||{},sections=data.sections||{};
   const workers=sections.workers?.data||[],quant=workers.find(row=>row.service==="quant_core"),market=workers.find(row=>row.service==="market_gateway"),execution=data.execution_readiness||{};
   overviewLive=backendConnected&&data.status!=="STALE";
   const quantReady=overviewLive&&quant?.freshness==="OK",marketReady=overviewLive&&market?.freshness==="OK"&&market.data_ready===true,analysisReady=quantReady&&data.analysis_readiness?.ready===true;
   const orderReady=overviewLive&&execution.ready===true,entriesAllowed=orderReady&&execution.entries_enabled===true;
   const candidates=overviewLive?(sections.candidates?.data||[]).filter(row=>row.freshness==="OK"):[];
   const armed=candidates.some(row=>row.state==="ARMED")||(quantReady&&Number(quant.evaluated_count)>0&&(quant.symbol_results||[]).some(row=>row.state==="ARMED"));
-  const regime=engine.regime||quant?.regime_label;
+  const regime=analysisEngine.regime||quant?.regime_label;
   const strategyAllowed=["TREND_EXPANSION","RANGE"].includes(regime);
   ovText("runtime-mode",entriesAllowed?"TESTNET":overviewLive?"GÖZLEM":"Doğrulanamadı");
   ovBadge("overview-connection",overviewLive?"● WebSocket · bağlı":"● Son veri · bağlantı bekleniyor",overviewLive?"OK":"UNKNOWN");
   ovText("overview-updated",overviewLive?"Ölçüm: "+localTime(data.evaluated_at||data.as_of):"Canlı ölçüm doğrulanamadı");
   ovBadge("algorithm-status",!overviewLive?"● Doğrulanamadı":quantReady?"● Analiz motoru çalışıyor":"● Analiz bekliyor",quantReady?"ACTIVE":"UNKNOWN");
-  ovText("algorithm-headline",!overviewLive?"Piyasa bağlantısı doğrulanıyor":engine.state==="ERROR"?"Analiz motorunda hata var":engine.state==="DELAYED"?"Analiz verisi gecikiyor":quant?.regime_label==="DISORDER"?"Stratejiler bu piyasa rejimine uygun değil":orderReady&&analysisReady&&armed&&strategyAllowed?"Koşullar hazır. Tetik izleniyor.":entriesAllowed&&analysisReady?"Piyasa izleniyor, işlem koşulları hazır":analysisReady?"Piyasa analizi güncel, fırsatlar izleniyor":quantReady?"Tarama devam ediyor, teyit bekleniyor":"Güncel analiz ölçümü bekleniyor");
-  ovText("algorithm-explanation",overviewLive?[ovReason(engine.reason||quant?.reason),engine.scan_source_at?"Tarama mumu: "+localTime(engine.scan_source_at):null].filter(Boolean).join(" · "):"Bağlantı kesildiğinde son ölçümler korunur, ancak canlı durum ve işlem hazırlığı doğrulanamaz.");
+  ovText("algorithm-headline",!overviewLive?"Piyasa bağlantısı doğrulanıyor":analysisEngine.state==="ERROR"?"Analiz motorunda hata var":analysisEngine.state==="DELAYED"?"Analiz verisi gecikiyor":quant?.regime_label==="DISORDER"?"Stratejiler bu piyasa rejimine uygun değil":orderReady&&analysisReady&&armed&&strategyAllowed?"Koşullar hazır. Tetik izleniyor.":entriesAllowed&&analysisReady?"Piyasa izleniyor, işlem koşulları hazır":analysisReady?"Piyasa analizi güncel, fırsatlar izleniyor":quantReady?"Tarama devam ediyor, teyit bekleniyor":"Güncel analiz ölçümü bekleniyor");
+  ovText("algorithm-explanation",overviewLive?[ovReason(analysisEngine.reason||quant?.reason),analysisEngine.scan_source_at?"Tarama mumu: "+localTime(analysisEngine.scan_source_at):null].filter(Boolean).join(" · "):"Bağlantı kesildiğinde son ölçümler korunur, ancak canlı durum ve işlem hazırlığı doğrulanamaz.");
   ovText("data-status",marketReady?"Güncel":overviewLive?"Doğrulanmadı":"Bilinmiyor");ovText("analysis-status",analysisReady?"Hazır":quantReady?"Teyit bekliyor":"Bilinmiyor");ovText("execution-status",orderReady?"Emir koşulları hazır":overviewLive?"Girişler bekliyor":"Bilinmiyor");
   for(const [id,yes] of [["data-status",marketReady],["analysis-status",analysisReady],["execution-status",orderReady]])$(id).className=yes?"ready":"";
   ovText("execution-note",entriesAllowed?"Sunucu, yeni testnet girişlerini yetkilendiriyor; risk kontrolleri her emir için ayrıca çalışır.":overviewLive?"Gözlem modu · yeni emir için risk, veri ve hesap doğrulaması gerekli.":"Emir hazırlığı bilinmiyor; bağlantının geri gelmesi bekleniyor.");
-  ovText("regime-label",quantReady?regimeText(engine.regime||quant.regime_label):"—");ovText("engine-timeframe",overviewLive?engine.timeframe||"—":"—");
-  ovText("success-time",localTime(quant?.last_success_at));ovText("analysis-time",quantReady?localTime(engine.last_analysis_at||quant?.last_analysis_at):"—");ovText("analysis-source-time",quantReady?localTime(engine.last_source_at||quant?.last_analysis_source_at):"—");ovText("evaluation-time",localTime(engine.last_evaluation_at||quant?.last_evaluation_at));ovText("evaluated-count",quantReady?ovNum(pairs.evaluated??quant?.evaluated_count)+" yön / strateji":"—");
+  ovText("regime-label",quantReady?regimeText(analysisEngine.regime||quant.regime_label):"—");ovText("engine-timeframe",overviewLive?analysisEngine.timeframe||"—":"—");
+  ovText("success-time",localTime(quant?.last_success_at));ovText("analysis-time",quantReady?localTime(analysisEngine.last_analysis_at||quant?.last_analysis_at):"—");ovText("analysis-source-time",quantReady?localTime(analysisEngine.last_source_at||quant?.last_analysis_source_at):"—");ovText("evaluation-time",localTime(analysisEngine.last_evaluation_at||quant?.last_evaluation_at));ovText("evaluated-count",quantReady?ovNum(pairs.evaluated??quant?.evaluated_count)+" yön / strateji":"—");
   ovText("engine-pair-total",overviewLive&&sections.universe?.status==="OK"?ovNum(pairs.eligible):"—");
   ovText("engine-pair-scan",overviewLive?ovNum(pairs.scanned):"—");ovText("engine-pair-analyzed",overviewLive?ovNum(pairs.analyzed):"—");ovText("engine-evaluated",quantReady?ovNum(pairs.evaluated??quant?.evaluated_count):"—");
   const streams=sections.streams?.data?.[0],streamSafe=overviewLive&&["OK","DEGRADED"].includes(sections.streams?.status)&&streams?.clock_safe===true;
   ovText("ov-coverage",streamSafe&&Number(pairs.feed_total)>0&&pairs.feed!=null?Math.round(pairs.feed/pairs.feed_total*100)+"%":"—");
   ovText("ov-lag",overviewLive?ovElapsed(live?.latency?.analysis_seconds):"—");
-  ovBadge("engine-state",overviewLive?overviewEngineText[engine.state]||"Doğrulanamadı":"Veri bekleniyor",overviewLive?engine.state:"UNKNOWN");
+  ovBadge("engine-state",overviewLive?overviewEngineText[analysisEngine.state]||"Doğrulanamadı":"Veri bekleniyor",overviewLive?analysisEngine.state:"UNKNOWN");
   ovText("engine-updated",overviewLive?"Güncelleme: "+localTime(data.evaluated_at||data.as_of):"Son ölçüm güncel değil");
-  ovText("engine-source",overviewLive?[engine.timeframe||"—",ovNum(pairs.scanned)+" tarama",regimeText(engine.regime)].join(" · "):"Tarama kaynağı bekleniyor");
+  ovText("engine-source",overviewLive?[analysisEngine.timeframe||"—",ovNum(pairs.scanned)+" tarama",regimeText(analysisEngine.regime)].join(" · "):"Tarama kaynağı bekleniyor");
   // Do not infer full deep coverage from a market feed connection or a scan result.
   overviewRows=Array.isArray(live?.pairs_detail)?live.pairs_detail.filter(row=>row&&typeof row.symbol==="string"):[];
   if(!overviewRows.find(row=>row.symbol===overviewSelected))overviewSelected=overviewRows.find(row=>row.stage==="DEEP")?.symbol||overviewRows[0]?.symbol||"";
@@ -281,7 +281,7 @@ function renderOverview(data){
   for(const [name,state,detail] of [["Panel bağlantısı",overviewLive?"CONNECTED":"UNKNOWN",overviewLive?"WebSocket açık":"Yeni ölçüm bekleniyor"],["Binance WebSocket",overviewLive?links.binance_websocket:"UNKNOWN",links.ws_reconnects==null?null:links.ws_reconnects+" yeniden bağlanma"],["Binance REST",overviewLive?links.binance_rest:"UNKNOWN",links.rest_last_success_at?"Son başarılı "+localTime(links.rest_last_success_at):links.rest_last_reason]]){
     const row=node("div","","ov-connection");const label=node("span",name),valueNode=node("div","","ov-connection-right");valueNode.append(node("strong",({CONNECTED:"Bağlı",NO_DATA:"Veri yok",UNAVAILABLE:"Kullanılamıyor",RATE_LIMITED:"İstek sınırı",STALE:"Güncel değil",NOT_SAMPLED:"Ölçülmedi",UNKNOWN:"Bilinmiyor"})[state]||"Bilinmiyor","ov-"+ovClass(state)));if(detail&&overviewLive)valueNode.append(node("small",String(detail)));row.append(label,valueNode);connectionRoot.append(row);
   }
-  const blockers=$("engine-blockers");blockers.replaceChildren();const codes=overviewLive?[...new Set([...(execution.blockers||[]),...(!analysisReady&&engine.reason?[engine.reason]:[])].filter(Boolean))]:[];
+  const blockers=$("engine-blockers");blockers.replaceChildren();const codes=overviewLive?[...new Set([...(execution.blockers||[]),...(!analysisReady&&analysisEngine.reason?[analysisEngine.reason]:[])].filter(Boolean))]:[];
   for(const code of codes.slice(0,5)){const row=node("div","","ov-reason");row.append(node("span","!"),node("p",ovReason(code)));blockers.append(row);}if(!codes.length)blockers.append(node("p",overviewLive?"Şu anda bildirilen kritik motor engeli yok; bu işlem onayı değildir.":"Engel listesi doğrulanamadı; bağlantı bekleniyor.","ov-muted"));
   const reasonRoot=$("engine-rejection-reasons");reasonRoot.replaceChildren();const counts=Object.entries(quant?.last_evaluation?.reason_counts||quant?.reason_counts||{}).filter(([,v])=>Number.isFinite(Number(v))).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,5);const max=Math.max(1,...counts.map(([,c])=>Number(c)));
   for(const [code,count] of counts){const row=node("div","","ov-reason-meter"),info=node("div","","ov-reason-meter-top");info.append(node("span",ovReason(code)),node("strong",String(count)));const track=document.createElement("progress");track.max=max;track.value=Number(count);row.append(info,track);reasonRoot.append(row);}

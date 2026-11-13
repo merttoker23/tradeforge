@@ -8,13 +8,13 @@ import pytest
 from aiohttp import ClientSession, web
 from sqlalchemy import text
 
-from tests.execution_fixtures import FakeBroker, setup_execution
-from tests.integration.test_execution_orders import manager
+from tests.execution_fixtures import setup_execution
 
 
 def test_embedded_execution_rejects_unsafely_disabled_account_stream():
-    from tradeforge.runtime.auto_execution import execution_cycle
     from types import SimpleNamespace
+
+    from tradeforge.runtime.auto_execution import execution_cycle
 
     results = []
     recovery = SimpleNamespace(ready=False, reconcile=lambda: results.append("reconcile"))

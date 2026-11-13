@@ -130,7 +130,12 @@ def test_new_loss_during_repair_keeps_repair_pending():
     asyncio.run(scenario())
 
 
-def test_other_socket_reset_invalidates_cleared_depth_queue():
+def test_other_socket_reset_keeps_the_retained_depth_evidence():
+    """A reset of one socket must not destroy another socket's book evidence.
+
+    The rebalance-safe design scopes a socket reset to its own streams. The
+    depth book's own socket is the only one that may invalidate it.
+    """
     from tradeforge.market.clock_sync import ClockSync
     from tradeforge.market.market_gateway import MarketGateway
     from tradeforge.market.streams import StreamSpec
@@ -143,6 +148,21 @@ def test_other_socket_reset_invalidates_cleared_depth_queue():
     book.install(snapshot(), START + timedelta(seconds=2), generation=1)
     gateway.queue.put(event(first=102, last=102, previous=101), priority=2)
     gateway.socket_state((StreamSpec("!ticker@arr"),), "STALE", 1)
+    assert book.state is StreamState.READY
+
+
+def test_own_socket_reset_invalidates_its_book():
+    """The reset of the stream's own socket invalidates that stream's book."""
+    from tradeforge.market.clock_sync import ClockSync
+    from tradeforge.market.market_gateway import MarketGateway
+
+    gateway = MarketGateway(ClockSync())
+    gateway.canonical.configure((instrument(),), ("BTCUSDT",))
+    gateway.canonical.socket_state((event().stream,), "SYNCING", 1)
+    gateway.canonical.consume(event())
+    book = gateway.canonical.books["BTCUSDT"]
+    book.install(snapshot(), START + timedelta(seconds=2), generation=1)
+    gateway.socket_state((event().stream,), "STALE", 1)
     assert book.state is StreamState.UNSYNCED
 
 

@@ -45,7 +45,7 @@ class OutboxWorker:
     def drain(self, *, limit: int = 8) -> int:
         """Bounded dispatch of committed intents; never bypass manager guards."""
         if not 1 <= limit <= 100:
-            raise ValueError('INVALID_OUTBOX_DRAIN_LIMIT')
+            raise ValueError("INVALID_OUTBOX_DRAIN_LIMIT")
         dispatched = 0
         for _ in range(limit):
             if not self.run_once():

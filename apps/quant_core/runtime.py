@@ -22,7 +22,7 @@ from tradeforge.runtime.signals import shutdown_signals
 from tradeforge.runtime.storage import save_runtime
 
 
-def preserve_analysis(state: dict, failed: dict) -> dict:
+def preserve_analysis(state: dict[str, object], failed: dict[str, object]) -> dict[str, object]:
     """Carry the last known analysis counters into a failed cycle's state."""
     for key in ANALYSIS_COUNTERS:
         if key in state:
@@ -122,17 +122,17 @@ async def run_cycle(
                 # Fetch fresh microstructure and dispatch one ready pair at a
                 # time; the cursor still gives every ready pair a turn.
                 symbols = analysis.next_batch(
-                    frozenset(
-                        row["symbol"] for row in deep_status if row.get("ready") is True
-                    ),
+                    frozenset(row["symbol"] for row in deep_status if row.get("ready") is True),
                     limit=1,
                 )
             # The analysis cycle is longer than the market evidence's freshness
             # window. The alpha inputs must be measured against a market
             # snapshot that is still fresh at the evaluation time, otherwise
             # every price is rejected as stale before it is even considered.
+            assert session is not None
             current = (
-                feed if symbols == frozenset()
+                feed
+                if symbols == frozenset()
                 else await fetch_memory(session, internal_token, base=gateway_base, symbols=symbols)
             )
             inputs = await asyncio.to_thread(
@@ -146,10 +146,7 @@ async def run_cycle(
             )
             worker.state.update(diagnostics)
             if symbols is not None:
-                inputs = tuple(
-                    sample for sample in inputs
-                    if sample.instrument.symbol in symbols
-                )
+                inputs = tuple(sample for sample in inputs if sample.instrument.symbol in symbols)
             last_input_check = deepcopy(
                 {
                     "as_of": worker.clock().isoformat(),
@@ -162,9 +159,7 @@ async def run_cycle(
                 if symbols is None:
                     await asyncio.to_thread(analysis.evaluate, inputs)
                 else:
-                    await asyncio.to_thread(
-                        analysis.evaluate, inputs, symbols=symbols
-                    )
+                    await asyncio.to_thread(analysis.evaluate, inputs, symbols=symbols)
                 worker.state.update(analysis.state)
                 worker.progress.state["last_evaluation_at"] = worker.clock().isoformat()
                 # Display history is separate from this pass's readiness and
@@ -230,11 +225,12 @@ async def serve(
     execution_task: asyncio.Task[None] | None = None
     if active is not None:
         import os
+
         from tradeforge.config.policy import RuntimeMode
         from tradeforge.config.settings import load_settings
-        from tradeforge.runtime.binance_environment import load_credentials
         from tradeforge.execution.binance_client import BinanceTestnetClient, Credentials
         from tradeforge.runtime.auto_execution import serve as execute
+        from tradeforge.runtime.binance_environment import load_credentials
 
         mode = load_settings().mode
         enabled = os.environ.get("TF_AUTO_ORDERS", "false")
@@ -250,12 +246,20 @@ async def serve(
                 raise ValueError("AUTO_EXECUTION_CREDENTIALS_MISSING")
             client = BinanceTestnetClient(
                 Credentials.model_validate({"api_key": pair[0], "api_secret": pair[1]}),
-                mode="testnet", opted_in=True, read_only=False,
+                mode="testnet",
+                opted_in=True,
+                read_only=False,
             )
             execution_task = asyncio.create_task(
-                execute(db, client, internal_token=internal_token,
-                        enable_entries=True, trial_enabled=True,
-                        expected_revision=active.revision, gateway_base=gateway_base)
+                execute(
+                    db,
+                    client,
+                    internal_token=internal_token,
+                    enable_entries=True,
+                    trial_enabled=True,
+                    expected_revision=active.revision,
+                    gateway_base=gateway_base,
+                )
             )
     worker = QuantWorker(db, require_gateway=True)
     runner = web.AppRunner(create_app(worker), access_log=None)
@@ -267,9 +271,9 @@ async def serve(
             analysis = AutonomousAnalysis(db)
             async with ClientSession(trust_env=False) as session:
                 expected = time.monotonic()
-                last_run = float('-inf')
-                last_full_run = float('-inf')
-                cursor, epoch = 0, ''
+                last_run = float("-inf")
+                last_full_run = float("-inf")
+                cursor, epoch = 0, ""
                 pending_symbols: set[str] = set()
                 while not stop.is_set():
                     if execution_task is not None and execution_task.done():
@@ -289,28 +293,32 @@ async def serve(
                             continue
                         if current.revision != active.revision:
                             raise RuntimeError("BINANCE_ENVIRONMENT_RESTART_REQUIRED")
-                    if last_run != float('-inf'):
+                    if last_run != float("-inf"):
                         try:
                             packet = await fetch_market_events(
-                                session, internal_token, after=cursor, epoch=epoch, wait=0.25,
+                                session,
+                                internal_token,
+                                after=cursor,
+                                epoch=epoch,
+                                wait=0.25,
                                 base=gateway_base,
                             )
-                            cursor = int(packet['sequence'])
-                            epoch = str(packet['epoch'])
-                            if packet['overflow']:
+                            cursor = int(packet["sequence"])
+                            epoch = str(packet["epoch"])
+                            if packet["overflow"]:
                                 pending_symbols.clear()
                                 refresh_all = True
                                 frame_changed = True
                             else:
                                 refresh_all = False
                                 frame_changed = any(
-                                    isinstance(event, dict) and event.get('kind') == 'FRAME'
-                                    for event in packet['events']
+                                    isinstance(event, dict) and event.get("kind") == "FRAME"
+                                    for event in packet["events"]
                                 )
                                 pending_symbols.update(
-                                    str(event['symbol'])
-                                    for event in packet['events']
-                                    if isinstance(event, dict) and 'symbol' in event
+                                    str(event["symbol"])
+                                    for event in packet["events"]
+                                    if isinstance(event, dict) and "symbol" in event
                                 )
                         except (OSError, ValueError, TimeoutError, KeyError, TypeError):
                             # Event hints are never authority; periodic recovery
@@ -324,7 +332,7 @@ async def serve(
                         refresh_all = True
                         frame_changed = True
                     started = time.monotonic()
-                    worker.progress.state['loop_lag_ms'] = round(
+                    worker.progress.state["loop_lag_ms"] = round(
                         max(0, started - expected) * 1000, 3
                     )
                     expected = started
@@ -332,12 +340,16 @@ async def serve(
                     # and notifications missed during a process restart.
                     periodic_reconcile = started - last_full_run >= 5
                     selection = (
-                        None if refresh_all or frame_changed or periodic_reconcile
+                        None
+                        if refresh_all or frame_changed or periodic_reconcile
                         else frozenset(pending_symbols)
                     )
                     pending_symbols.clear()
                     await run_cycle(
-                        worker, analysis, session, internal_token,
+                        worker,
+                        analysis,
+                        session,
+                        internal_token,
                         changed_symbols=selection,
                         gateway_base=gateway_base,
                     )
@@ -388,9 +400,7 @@ def main() -> int:
     args = parser.parse_args()
     db = None
     try:
-        token = (
-            local_token_file(args.gateway_token_file) if args.gateway_token_file else None
-        )
+        token = local_token_file(args.gateway_token_file) if args.gateway_token_file else None
         base = loopback_base(args.gateway_base) if args.gateway_base else None
         db = local_database(args.database_file)
         if not 0 <= args.port <= 65535:

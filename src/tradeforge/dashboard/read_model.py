@@ -412,7 +412,10 @@ def _finite_number(value: object) -> bool:
 
 
 def _finite_or_none(value: object) -> float | None:
-    return float(value) if _finite_number(value) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def _scan_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -431,15 +434,11 @@ def _scan_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "volatility": _finite_or_none(row.get("volatility")),
         "relative_return": _finite_or_none(row.get("relative_return")),
         "efficiency": _finite_or_none(row.get("efficiency")),
-        "direction": direction
-        if type(direction) is int and direction in (-1, 0, 1)
-        else None,
+        "direction": direction if type(direction) is int and direction in (-1, 0, 1) else None,
         "spread_bps": _finite_or_none(row.get("spread_bps")),
         "funding": _finite_or_none(row.get("funding")),
         "change_point": change_point if isinstance(change_point, bool) else None,
-        "analyzed_at": row.get("analyzed_at")
-        if isinstance(row.get("analyzed_at"), str)
-        else None,
+        "analyzed_at": row.get("analyzed_at") if isinstance(row.get("analyzed_at"), str) else None,
         "source_at": row.get("source_at") if isinstance(row.get("source_at"), str) else None,
     }
 
@@ -552,19 +551,20 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     pair_rows.sort(key=lambda row: (row.get("stage") != "DEEP", str(row.get("symbol"))))
 
     decisions = [row.get("decision") for row in deep_by_symbol.values()]
-    analysis_delay = _age_seconds(at, quant.get("last_analysis_at") if quant else None)
     quant_source = (
         quant.get("last_analysis_source_at") or quant.get("last_source_at") if quant else None
     )
+    # The analysis delay is the age of the market evidence the last analysis
+    # consumed. The age of the analysis record itself says nothing about how
+    # far the published measurement trails the live market.
+    analysis_delay = _age_seconds(at, quant_source)
     source_age = _age_seconds(at, quant_source or regime.get("source_at"))
     quant_reason = quant.get("reason") if quant else None
     timeframe = str(
-        (quant.get("analysis_timeframe") if quant else None)
-        or regime.get("timeframe")
-        or ""
+        (quant.get("analysis_timeframe") if quant else None) or regime.get("timeframe") or ""
     )
-    max_source_age = quant.get("max_source_age_seconds") if quant else None
-    if not _finite_number(max_source_age) or float(max_source_age) <= 0:
+    max_source_age = _finite_or_none(quant.get("max_source_age_seconds") if quant else None)
+    if max_source_age is None or max_source_age <= 0:
         max_source_age = TIMEFRAME_SECONDS.get(timeframe, 900) * 1.5
 
     if quant and quant.get("healthy") is False and quant.get("last_error"):
@@ -573,9 +573,7 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     elif not quant_fresh:
         engine_state = "DELAYED"
         engine_reason = "ANALYSIS_WORKER_LAG" if quant else "ANALYSIS_NOT_OBSERVED"
-    elif source_age is not None and float(max_source_age) > 0 and source_age > float(
-        max_source_age
-    ):
+    elif source_age is not None and max_source_age > 0 and source_age > max_source_age:
         engine_state = "DELAYED"
         engine_reason = (
             quant_reason
@@ -604,9 +602,7 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     orders = sections.get("orders", {}).get("data") or []
     orders_known = sections.get("orders", {}).get("status") == "OK"
     order_rows = [row for row in orders if isinstance(row, dict)] if orders_known else []
-    pending = sum(
-        1 for row in order_rows if row.get("status") in {"NEW", "PARTIALLY_FILLED"}
-    )
+    pending = sum(1 for row in order_rows if row.get("status") in {"NEW", "PARTIALLY_FILLED"})
     ack_unknown = sum(1 for row in order_rows if row.get("status") == "ACK_UNKNOWN")
     rejected = sum(1 for row in order_rows if row.get("status") == "REJECTED")
     filled = sum(1 for row in order_rows if row.get("status") == "FILLED")
@@ -623,9 +619,7 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     pipeline = [
         {
             "stage": "SIGNAL",
-            "state": ("PRESENT" if signal_rows else "NONE")
-            if signal_available
-            else "UNKNOWN",
+            "state": ("PRESENT" if signal_rows else "NONE") if signal_available else "UNKNOWN",
             "last_at": last_signal.get("as_of") if last_signal else None,
             "detail": len(signal_rows) if signal_available else None,
         },
@@ -662,9 +656,7 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     ]
 
     market_latency = (
-        _age_seconds(at, stream.get("source_at"))
-        if stream_status in {"OK", "DEGRADED"}
-        else None
+        _age_seconds(at, stream.get("source_at")) if stream_status in {"OK", "DEGRADED"} else None
     )
     ws_state = stream.get("websocket_state")
     if ws_state not in {"CONNECTED", "NO_DATA", "UNAVAILABLE"}:
@@ -801,6 +793,7 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
         "errors": errors[:12],
     }
 
+
 def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
     """Age source deadlines after a query or cache hit without renewing evidence."""
     utc(at)
@@ -921,8 +914,9 @@ def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
         for name in ("universe", "streams", "regime", "opportunities")
     }
     data_readiness["analysis"] = analysis_status
-    # Risk ve protection execution_guardian servisine bağlıdır; servis kaldırıldığı
-    # için gözlem modunda raporlanmaz. "NOT_RUNNING" uyarısı yerine panelden çıkarılır.
+    # Risk and protection evidence is now owned by the embedded execution
+    # service. It is projected as its own section and must not masquerade as
+    # an unknown telemetry alarm while the service is not running yet.
     result["data_readiness"] = data_readiness
     result["trading_authority"] = {
         "status": "READY" if result["execution_readiness"]["ready"] else "NOT_READY",
@@ -967,8 +961,7 @@ def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
         and protection_ok
         and risk_ok
         and all(
-            sections.get(k, {}).get("status") == "OK"
-            for k in ("universe", "regime", "account")
+            sections.get(k, {}).get("status") == "OK" for k in ("universe", "regime", "account")
         )
         else "DEGRADED"
     )
@@ -1051,14 +1044,14 @@ def _safe_fields(row: dict[str, Any]) -> None:
                         "decision": decision,
                         "strategy": strategy,
                         "strategies": [
-                            name for name in strategies[:2]
-                            if name in ("MOMENTUM", "REVERSAL")
-                        ] if isinstance(strategies, list) else [],
+                            name for name in strategies[:2] if name in ("MOMENTUM", "REVERSAL")
+                        ]
+                        if isinstance(strategies, list)
+                        else [],
                         "reasons": [
                             x
                             for x in (reasons if isinstance(reasons, list) else [])[:16]
-                            if isinstance(x, str)
-                            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", x)
+                            if isinstance(x, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", x)
                         ],
                     }
                 )
@@ -1304,9 +1297,7 @@ class ReadModel:
                     for row in c.execute(MARKET_SCAN, {"at": now}).mappings()
                 ]
             result["sections"] = sections
-            result["market_scan"] = [
-                row for row in scan_rows if row is not None
-            ]
+            result["market_scan"] = [row for row in scan_rows if row is not None]
             result = refresh_freshness(result, utc(self.clock()))
         except Exception:
             # SQL, credentials, schema details and driver errors never cross HTTP.

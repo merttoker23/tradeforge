@@ -216,7 +216,10 @@ class DemoDecisions:
         )
 
     def tick(
-        self, feed: dict[str, Any], *, symbols: frozenset[str] | None = None,
+        self,
+        feed: dict[str, Any],
+        *,
+        symbols: frozenset[str] | None = None,
         pending: tuple[Record, ...] | None = None,
     ) -> None:
         try:
@@ -247,7 +250,10 @@ class DemoDecisions:
         return tuple(Record.model_validate_json(payload) for payload in rows)
 
     def _tick(
-        self, feed: dict[str, Any], *, symbols: frozenset[str] | None = None,
+        self,
+        feed: dict[str, Any],
+        *,
+        symbols: frozenset[str] | None = None,
         pending: tuple[Record, ...] | None = None,
     ) -> None:
         at = self.client.clock()

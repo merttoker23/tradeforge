@@ -104,14 +104,14 @@ class AutonomousAnalysis:
         return frozenset(batch)
 
     def evaluate(
-        self, inputs: tuple[MomentumInput, ...], *,
+        self,
+        inputs: tuple[MomentumInput, ...],
+        *,
         symbols: frozenset[str] | None = None,
     ) -> int:
         # Re-evaluation of one symbol may not mutate unrelated alpha state.
         if symbols is not None:
-            inputs = tuple(
-                sample for sample in inputs if sample.instrument.symbol in symbols
-            )
+            inputs = tuple(sample for sample in inputs if sample.instrument.symbol in symbols)
         at = self.clock()
         momentum, reversal = deepcopy(self.momentum), deepcopy(self.reversal)
         discoveries = []
@@ -131,7 +131,8 @@ class AutonomousAnalysis:
                     "decision": "NO_TRADE",
                     "strategy": None,
                     "strategies": ["MOMENTUM", "REVERSAL"]
-                    if isinstance(sample, ReversalInput) else ["MOMENTUM"],
+                    if isinstance(sample, ReversalInput)
+                    else ["MOMENTUM"],
                     "reasons": [],
                 },
             )

@@ -1,4 +1,5 @@
 """Read-only Testnet account projection for the dashboard. No browser order authority."""
+
 from __future__ import annotations
 
 import asyncio

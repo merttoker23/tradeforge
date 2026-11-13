@@ -102,8 +102,14 @@ def decode_events(
     except FetchError:
         raise ValueError("INVALID_MARKET_JSON") from None
     return decode_frame(
-        payload, route=route, received_at=received_at, generation=generation, sequence=sequence,
-        eligible=eligible, max_age=max_age, max_future=max_future,
+        payload,
+        route=route,
+        received_at=received_at,
+        generation=generation,
+        sequence=sequence,
+        eligible=eligible,
+        max_age=max_age,
+        max_future=max_future,
     )
 
 

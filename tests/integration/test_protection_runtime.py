@@ -3,8 +3,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from aiohttp import ClientSession, web
-
 from tests.integration.test_protection_recovery import prepared
 
 

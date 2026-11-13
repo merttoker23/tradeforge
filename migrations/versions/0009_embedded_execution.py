@@ -1,4 +1,5 @@
 """Quant-owned execution telemetry and privileges; retain old immutable audit history."""
+
 from alembic import op
 
 revision = "0009"
@@ -10,9 +11,13 @@ depends_on = None
 def upgrade() -> None:
     # The previous live service has been retired, not silently reclassified.
     op.execute("DELETE FROM runtime_observations WHERE service='execution_guardian'")
-    op.execute("ALTER TABLE runtime_observations DROP CONSTRAINT runtime_observations_service_check")
-    op.execute("ALTER TABLE runtime_observations ADD CONSTRAINT runtime_observations_service_check "
-               "CHECK (service IN ('market_gateway','quant_core','execution_core'))")
+    op.execute(
+        "ALTER TABLE runtime_observations DROP CONSTRAINT runtime_observations_service_check"
+    )
+    op.execute(
+        "ALTER TABLE runtime_observations ADD CONSTRAINT runtime_observations_service_check "
+        "CHECK (service IN ('market_gateway','quant_core','execution_core'))"
+    )
     # Upgrade existing deployments before the separate bootstrap grant pass.
     # Fresh installs have no worker roles yet; initialize() will grant them.
     op.execute("""DO $$ BEGIN
@@ -43,10 +48,13 @@ def upgrade() -> None:
     END $$""")
 
 
-
 def downgrade() -> None:
     op.execute("DELETE FROM runtime_observations WHERE service='execution_core'")
-    op.execute("ALTER TABLE runtime_observations DROP CONSTRAINT runtime_observations_service_check")
-    op.execute("ALTER TABLE runtime_observations ADD CONSTRAINT runtime_observations_service_check "
-               "CHECK (service IN ('market_gateway','quant_core','execution_guardian'))")
+    op.execute(
+        "ALTER TABLE runtime_observations DROP CONSTRAINT runtime_observations_service_check"
+    )
+    op.execute(
+        "ALTER TABLE runtime_observations ADD CONSTRAINT runtime_observations_service_check "
+        "CHECK (service IN ('market_gateway','quant_core','execution_guardian'))"
+    )
     # Historical role remains disabled on rollback; a deliberate migration is required.

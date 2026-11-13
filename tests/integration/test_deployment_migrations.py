@@ -11,8 +11,8 @@ from deploy.automation.policy import migration_plan
 from tradeforge.persistence.db import EntryHalt
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE_REVISION = "0008"
-NEXT_REVISION = "0009"
+BASE_REVISION = "0009"
+NEXT_REVISION = "0010"
 
 
 def sources():

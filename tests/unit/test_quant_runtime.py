@@ -40,7 +40,8 @@ def test_small_deep_tier_is_evaluated_before_microstructure_expires(monkeypatch)
         selected = kwargs.get("symbols")
         selected = ready if selected is None else ready.intersection(selected)
         return {
-            "as_of": at[0], "markets": [],
+            "as_of": at[0],
+            "markets": [],
             "deep_status": [{"symbol": s, "ready": True} for s in sorted(selected)],
         }
 
@@ -52,8 +53,10 @@ def test_small_deep_tier_is_evaluated_before_microstructure_expires(monkeypatch)
         selected = ready if selected is None else ready.intersection(selected)
         # Full-universe feature validation costs time for each joined pair.
         at[0] += timedelta(seconds=3 * len(selected))
-        return tuple(SimpleNamespace(instrument=SimpleNamespace(symbol=s),
-                                     source_at=feed["as_of"]) for s in sorted(selected))
+        return tuple(
+            SimpleNamespace(instrument=SimpleNamespace(symbol=s), source_at=feed["as_of"])
+            for s in sorted(selected)
+        )
 
     def evaluate(samples, **kwargs):
         for sample in samples:
