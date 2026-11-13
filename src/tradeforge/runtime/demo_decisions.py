@@ -180,6 +180,9 @@ class DemoDecisions:
         self._last_reason = "NOT_EVALUATED"
         self._candidate_count = 0
         self._approvals = 0
+        self._triggered = 0
+        self._risk_allowed = 0
+        self._last_decision_id: str | None = None
         self._statistical_evidence: dict[str, object] = {}
 
     def _note(self, reason: str) -> None:
@@ -191,6 +194,9 @@ class DemoDecisions:
             "autonomous_decisions": {
                 "candidate_count": self._candidate_count,
                 "approvals": self._approvals,
+                "triggered": self._triggered,
+                "risk_allowed": self._risk_allowed,
+                "last_decision_id": self._last_decision_id,
                 "last_reason": self._last_reason,
                 "reason_counts": dict(self._reason_counts),
                 "trial_policy": self.trial_policy.model_dump(mode="json"),
@@ -290,6 +296,9 @@ class DemoDecisions:
                 continue
             market = MarketSnapshot.model_validate_json(canonical(market_row))
             book = OrderBookSnapshot.model_validate_json(canonical(micro["book"]))
+            if feed.get("environment") == "testnet" and market.environment != "testnet":
+                self._note("TESTNET_ENVIRONMENT_MISMATCH")
+                continue
             if market.quality is not DataQuality.OK:
                 self._note("DATA_QUALITY_BLOCKED")
                 continue
@@ -300,6 +309,7 @@ class DemoDecisions:
                 not market.costs_fresh(at, 5)
                 or not market.volume_fresh(at, 5)
                 or not 0 <= (at - book.source_at).total_seconds() <= 5
+                or not 0 <= (at - book.captured_at).total_seconds() <= 5
             ):
                 self._note("MARKET_EVIDENCE_STALE")
                 continue
@@ -314,6 +324,8 @@ class DemoDecisions:
                 continue
             if record.state is DecisionState.ARMED:
                 record = self._advance(record, DecisionState.VALIDATING)
+                self._triggered = min(2**31 - 1, self._triggered + 1)
+            self._last_decision_id = str(record.decision_id)
             evidence = self.evidence(record, market, book)
             if evidence is None:
                 # The existing lifecycle records explicit rejection reasons.
@@ -423,6 +435,7 @@ class DemoDecisions:
                     },
                 )
             return None
+        self._risk_allowed = min(2**31 - 1, self._risk_allowed + 1)
         cost = CostInput(
             notional=risk.sized.notional,
             initial_risk=risk.sized.qty * abs(candidate.trigger - candidate.stop_proposal),

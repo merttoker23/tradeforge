@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 import time
 from copy import deepcopy
 from datetime import timedelta
@@ -10,14 +11,18 @@ from pathlib import Path
 
 from aiohttp import ClientSession, web
 
+from tradeforge.config.policy import RuntimeMode
+from tradeforge.config.settings import load_settings
 from tradeforge.domain.market import MarketSnapshot
+from tradeforge.execution.binance_client import BinanceTestnetClient, Credentials
 from tradeforge.intelligence.runtime import ANALYSIS_COUNTERS, QuantWorker
 from tradeforge.market.socket_manager import pause
 from tradeforge.persistence.db import Database, PersistenceError
 from tradeforge.runtime.analysis import AutonomousAnalysis
+from tradeforge.runtime.binance_environment import load_credentials, select_environment
 from tradeforge.runtime.config import local_database, local_token_file
 from tradeforge.runtime.event_handoff import fetch_market_events
-from tradeforge.runtime.market_link import alpha_inputs, fetch_memory
+from tradeforge.runtime.market_link import alpha_inputs, fetch_memory, require_market_environment
 from tradeforge.runtime.signals import shutdown_signals
 from tradeforge.runtime.storage import save_runtime
 
@@ -31,8 +36,6 @@ def preserve_analysis(state: dict[str, object], failed: dict[str, object]) -> di
 
 
 def create_app(worker: QuantWorker) -> web.Application:
-    from tradeforge.config.settings import load_settings
-
     async def health(request: web.Request) -> web.Response:
         state = worker.status()
         return web.json_response(
@@ -52,6 +55,31 @@ def create_app(worker: QuantWorker) -> web.Application:
     return app
 
 
+def execution_preflight(
+    db: Database, mode: RuntimeMode, environment: str | None, token: str | None
+) -> tuple[str, Credentials | None, bool]:
+    enabled = os.environ.get("TF_AUTO_ORDERS", "false")
+    trial = os.environ.get("TF_TESTNET_TRIAL", "false")
+    if enabled not in {"true", "false"} or trial not in {"true", "false"}:
+        return "AUTO_ORDERS_CONFIG_INVALID", None, False
+    if enabled == "false":
+        return "TF_AUTO_ORDERS_DISABLED", None, False
+    if mode is not RuntimeMode.TESTNET:
+        return "TESTNET_MODE_REQUIRED", None, False
+    if environment != "testnet":
+        return "TESTNET_ENVIRONMENT_MISMATCH", None, False
+    if not token or len(token) < 43:
+        return "INTERNAL_TOKEN_MISSING", None, False
+    try:
+        pair = load_credentials(db, token, "testnet")
+        if pair is None:
+            return "TESTNET_CREDENTIALS_MISSING", None, False
+        credentials = Credentials.model_validate({"api_key": pair[0], "api_secret": pair[1]})
+    except (PersistenceError, ValueError):
+        return "TESTNET_CREDENTIALS_UNAVAILABLE", None, False
+    return "STARTING", credentials, trial == "true"
+
+
 async def run_cycle(
     worker: QuantWorker,
     analysis: AutonomousAnalysis | None,
@@ -61,6 +89,7 @@ async def run_cycle(
     changed_symbols: frozenset[str] | None = None,
     refresh_features: bool = True,
     gateway_base: str | None = None,
+    expected_environment: str | None = None,
 ) -> None:
     started = time.perf_counter()
     last_evaluation = worker.state.get("last_evaluation")
@@ -80,6 +109,7 @@ async def run_cycle(
                 session, internal_token, base=gateway_base, symbols=changed_symbols
             )
         if feed is not None:
+            require_market_environment(feed, expected_environment)
             worker.market_samples = tuple(
                 MarketSnapshot.model_validate_json(json.dumps(m)) for m in feed["markets"]
             )
@@ -105,6 +135,7 @@ async def run_cycle(
             ],
             selected_deep_count=len(feed.get("deep_status", feed.get("deep", []))) if feed else 0,
             ready_deep_count=sum(row.get("ready") is True for row in deep_status),
+            deep_status=deep_status[:64],
         )
         if (
             feed is not None
@@ -135,6 +166,8 @@ async def run_cycle(
                 if symbols == frozenset()
                 else await fetch_memory(session, internal_token, base=gateway_base, symbols=symbols)
             )
+            require_market_environment(current, expected_environment)
+            input_rejections = worker.state["input_rejections"]
             inputs = await asyncio.to_thread(
                 alpha_inputs,
                 worker.db,
@@ -144,6 +177,9 @@ async def run_cycle(
                 diagnostics=diagnostics,
                 symbols=symbols,
             )
+            latest_rejections = diagnostics.get("input_rejections")
+            if isinstance(latest_rejections, list):
+                diagnostics["input_rejections"] = [*input_rejections, *latest_rejections][:64]
             worker.state.update(diagnostics)
             if symbols is not None:
                 inputs = tuple(sample for sample in inputs if sample.instrument.symbol in symbols)
@@ -177,6 +213,11 @@ async def run_cycle(
                         "input_rejections": diagnostics.get("input_rejections", []),
                     }
                 )
+        elif deep_status:
+            last_input_check = {
+                "as_of": worker.clock().isoformat(),
+                "input_rejections": worker.state["input_rejections"],
+            }
         if worker.progress.state["healthy"]:
             worker.progress.advance("DISPATCH_COMPLETE")
         worker.state.update(worker.progress.state)
@@ -185,7 +226,9 @@ async def run_cycle(
         worker.progress.fail(error)
         worker.progress.state["healthy"] = False
         reason = (
-            "MARKET_HANDOFF_UNAVAILABLE"
+            "TESTNET_ENVIRONMENT_MISMATCH"
+            if str(error) == "TESTNET_ENVIRONMENT_MISMATCH"
+            else "MARKET_HANDOFF_UNAVAILABLE"
             if stage == "MARKET_HANDOFF"
             else "QUANT_ANALYSIS_UNAVAILABLE"
         )
@@ -217,68 +260,74 @@ async def serve(
     internal_token: str | None = None,
     gateway_base: str | None = None,
 ) -> None:
-    from tradeforge.runtime.binance_environment import select_environment
+    from tradeforge.runtime.auto_execution import serve as execute
 
-    active = select_environment(db) if internal_token is not None else None
+    mode = load_settings().mode
+    testnet = mode is RuntimeMode.TESTNET
+    active = select_environment(db) if internal_token is not None or testnet else None
     if active is not None:
         db.pin_environment(active.revision)
     execution_task: asyncio.Task[None] | None = None
-    if active is not None:
-        import os
-
-        from tradeforge.config.policy import RuntimeMode
-        from tradeforge.config.settings import load_settings
-        from tradeforge.execution.binance_client import BinanceTestnetClient, Credentials
-        from tradeforge.runtime.auto_execution import serve as execute
-        from tradeforge.runtime.binance_environment import load_credentials
-
-        mode = load_settings().mode
-        enabled = os.environ.get("TF_AUTO_ORDERS", "false")
-        if enabled not in {"false", "true"}:
-            raise ValueError("AUTO_ORDERS_CONFIG_INVALID")
-        if enabled == "true":
-            if mode is not RuntimeMode.TESTNET or active.name != "testnet":
-                raise ValueError("TESTNET_AUTO_ORDERS_REQUIRED")
-            if not internal_token:
-                raise ValueError("AUTO_EXECUTION_MASTER_REQUIRED")
-            pair = load_credentials(db, internal_token, "testnet")
-            if pair is None:
-                raise ValueError("AUTO_EXECUTION_CREDENTIALS_MISSING")
-            client = BinanceTestnetClient(
-                Credentials.model_validate({"api_key": pair[0], "api_secret": pair[1]}),
-                mode="testnet",
-                opted_in=True,
-                read_only=False,
-            )
-            execution_task = asyncio.create_task(
-                execute(
-                    db,
-                    client,
-                    internal_token=internal_token,
-                    enable_entries=True,
-                    trial_enabled=True,
-                    expected_revision=active.revision,
-                    gateway_base=gateway_base,
-                )
-            )
+    reason, credentials, trial = execution_preflight(
+        db, mode, active.name if active else None, internal_token
+    )
     worker = QuantWorker(db, require_gateway=True)
+    worker.progress.state["execution_startup_reason"] = reason
+    worker.state["execution_startup_reason"] = reason
     runner = web.AppRunner(create_app(worker), access_log=None)
     stop = asyncio.Event()
     with shutdown_signals(stop):
         await runner.setup()
         try:
             await web.TCPSite(runner, host, port).start()
+            if credentials is not None:
+                assert active is not None and internal_token is not None
+                client = BinanceTestnetClient(
+                    credentials, mode="testnet", opted_in=True, read_only=False
+                )
+                execution_task = asyncio.create_task(
+                    execute(
+                        db,
+                        client,
+                        internal_token=internal_token,
+                        enable_entries=True,
+                        trial_enabled=trial,
+                        expected_revision=active.revision,
+                        gateway_base=gateway_base,
+                    )
+                )
             analysis = AutonomousAnalysis(db)
             async with ClientSession(trust_env=False) as session:
                 expected = time.monotonic()
                 last_run = float("-inf")
                 last_full_run = float("-inf")
+                storage_checked = float("-inf")
                 cursor, epoch = 0, ""
                 pending_symbols: set[str] = set()
                 while not stop.is_set():
                     if execution_task is not None and execution_task.done():
-                        await execution_task  # Failed execution must not run silently.
-                        raise RuntimeError("AUTO_EXECUTION_STOPPED")
+                        reason = "AUTO_EXECUTION_STOPPED"
+                        if (
+                            not execution_task.cancelled()
+                            and execution_task.exception() is not None
+                        ):
+                            reason = "AUTO_EXECUTION_FAILED"
+                        worker.progress.state["execution_startup_reason"] = reason
+                        execution_task = None
+                    if (
+                        testnet
+                        and execution_task is None
+                        and time.monotonic() - storage_checked >= 5
+                    ):
+                        from tradeforge.runtime.maintenance import observe_storage
+
+                        storage_checked = time.monotonic()
+                        try:
+                            # Authenticated local market ingestion needs a storage
+                            # sample even when order execution is opted out.
+                            await asyncio.to_thread(observe_storage, db)
+                        except PersistenceError:
+                            pass  # Gateway admission rejects expired storage evidence.
                     if active is not None:
                         try:
                             current = await asyncio.to_thread(select_environment, db)
@@ -351,7 +400,9 @@ async def serve(
                         session,
                         internal_token,
                         changed_symbols=selection,
+                        refresh_features=selection is None,
                         gateway_base=gateway_base,
+                        expected_environment="testnet" if testnet else None,
                     )
                     last_run = time.monotonic()
                     if selection is None:
@@ -381,7 +432,7 @@ def loopback_base(value: str) -> str:
         or not 0 < port <= 65535
     ):
         raise ValueError("GATEWAY_BASE_LOOPBACK_REQUIRED")
-    return f"http://{host}:{port}"
+    return f"http://127.0.0.1:{port}"
 
 
 def main() -> int:
@@ -401,7 +452,7 @@ def main() -> int:
     db = None
     try:
         token = local_token_file(args.gateway_token_file) if args.gateway_token_file else None
-        base = loopback_base(args.gateway_base) if args.gateway_base else None
+        base = loopback_base(args.gateway_base or "http://127.0.0.1:8101")
         db = local_database(args.database_file)
         if not 0 <= args.port <= 65535:
             raise ValueError

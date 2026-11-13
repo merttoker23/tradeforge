@@ -68,6 +68,8 @@ BENCHMARK_SYMBOL = "BTCUSDT"
 ANALYSIS_COUNTERS = (
     "candidate_count",
     "reason_counts",
+    "process_reason_counts",
+    "last_hour",
     "evaluated_count",
     "analysis_symbols",
     "analyzed_symbols",
@@ -151,7 +153,7 @@ class QuantWorker:
         tradeable = bool(
             source_fresh
             and latest is not None
-            and latest.state.label not in {RegimeLabel.UNKNOWN, RegimeLabel.TRANSITION}
+            and latest.state.label in {RegimeLabel.RANGE, RegimeLabel.TREND_EXPANSION}
         )
         state = {
             **self.progress.state,
@@ -172,6 +174,7 @@ class QuantWorker:
             "max_source_age_seconds": max_age,
             "regime_label": latest.state.label.value if latest else "UNKNOWN",
             "regime_reasons": list(latest.reason_codes) if latest else [],
+            "regime_metrics": dict(latest.state.metrics) if latest else {},
         }
         # The last completed evaluation survives a tick that produced no new
         # strategy evidence. Only a newer evaluation may replace it.
@@ -221,7 +224,7 @@ class QuantWorker:
             history.append(snapshot)
             # Revisions of this closed period share its source time. Only an
             # earlier, distinct period can supply another confirmation.
-            cursor = snapshot.frame.source_at
+            cursor = snapshot.frame.source_at - timedelta(microseconds=1)
         if history:
             restored = RegimeEngine(policy)
             for snapshot in reversed(history):

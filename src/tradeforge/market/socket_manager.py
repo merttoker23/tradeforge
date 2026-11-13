@@ -40,6 +40,7 @@ def retry_delay(status: int, header: str) -> float:
 class WireFrame:
     kind: Literal["TEXT", "PING", "PONG", "CLOSE"]
     data: str | bytes = b""
+    close_code: int | None = None
 
 
 class MarketSocket(Protocol):
@@ -63,7 +64,7 @@ class _Socket:
             return WireFrame("PING", bytes(frame.data))
         if frame.type == aiohttp.WSMsgType.PONG:
             return WireFrame("PONG", bytes(frame.data))
-        return WireFrame("CLOSE")
+        return WireFrame("CLOSE", close_code=self.ws.close_code)
 
     async def pong(self, data: bytes) -> None:
         await self.ws.pong(data)
@@ -178,7 +179,7 @@ async def pause(stop: asyncio.Event, seconds: float) -> None:
         pass
 
 
-def _discard(task: asyncio.Task[WireFrame]) -> None:
+def _discard(task: asyncio.Future[WireFrame]) -> None:
     """Retrieve a finished transport task's outcome so it is never reported."""
     if not task.cancelled():
         task.exception()
@@ -202,6 +203,7 @@ class SocketManager:
         retry_base: float = 1,
         rotate_after: float = 23 * 3600 + 50 * 60,
         ack_timeout: float = 5,
+        data_timeout: float | None = None,
         max_future: float = 0,
         clock_ready: Callable[[], bool] | None = None,
     ) -> None:
@@ -209,12 +211,15 @@ class SocketManager:
             raise ValueError("INVALID_SOCKET_GROUP")
         if not 0 < rotate_after < 86400 or not 0 < ack_timeout <= 30 or not 0 < retry_base <= 30:
             raise ValueError("INVALID_SOCKET_POLICY")
+        if data_timeout is not None and not 0 < data_timeout <= 60:
+            raise ValueError("INVALID_SOCKET_POLICY")
         self.streams, self.connect, self.eligible = streams, connect, eligible
         self.on_event, self.on_state = on_event, on_state
         self.on_streams = on_streams or (lambda added, removed, generation: None)
         self.on_invalid_stream = on_invalid_stream
         self.clock, self.monotonic, self.jitter = clock, monotonic, jitter
         self.retry_base, self.rotate_after, self.ack_timeout = retry_base, rotate_after, ack_timeout
+        self.data_timeout = data_timeout
         self.max_future = max_future
         self.clock_ready = clock_ready or (lambda: True)
         self.generation = self.failures = 0
@@ -252,8 +257,8 @@ class SocketManager:
             while not stop.is_set():
                 self.generation += 1
                 self.on_state("SYNCING", self.generation)
-                began = self.monotonic()
                 retry_after = 0.0
+                pending: asyncio.Future[WireFrame] | None = None
                 try:
                     # The connection waits for a trusted clock. Market evidence
                     # of a skewed clock is rejected, and a rejected event would
@@ -264,6 +269,7 @@ class SocketManager:
                         await asyncio.sleep(0.05)
                     async with self.connect(self.streams[0].route) as ws:
                         await self._control()
+                        began = self.monotonic()
                         request_id = self.generation
                         await asyncio.wait_for(
                             ws.send_json(
@@ -279,6 +285,8 @@ class SocketManager:
                         subscribed = {s.name for s in self._desired}
                         invalidated: set[str] = set()
                         last_valid = self.monotonic()
+                        last_by_stream: dict[str, float] = {}
+                        acknowledged_at = began
                         pending = asyncio.ensure_future(ws.receive())
                         pending.add_done_callback(_discard)
                         while not stop.is_set():
@@ -330,12 +338,23 @@ class SocketManager:
                                     tuple(s for s in previous if s.name in removed),
                                     self.generation,
                                 )
-                            elapsed = self.monotonic() - began
+                            now = self.monotonic()
+                            elapsed = now - began
                             if elapsed >= self.rotate_after:
                                 self.reason = "WS_ROTATION"
                                 break
                             if not acknowledged and elapsed > self.ack_timeout:
                                 raise StreamFailure("WS_ACK_TIMEOUT")
+                            if (
+                                acknowledged
+                                and self.data_timeout is not None
+                                and any(
+                                    now - last_by_stream.get(name, acknowledged_at)
+                                    >= self.data_timeout
+                                    for name in subscribed
+                                )
+                            ):
+                                raise StreamFailure("WS_DATA_TIMEOUT")
                             # A pending receive must never be cancelled: the
                             # transport marks the connection abnormally closed
                             # when its read is cancelled, which would drop a
@@ -355,12 +374,9 @@ class SocketManager:
                             pending = asyncio.ensure_future(ws.receive())
                             pending.add_done_callback(_discard)
                             if frame.kind == "CLOSE":
-                                detail = (
-                                    frame.data.decode("utf-8", "replace")
-                                    if isinstance(frame.data, bytes)
-                                    else frame.data
-                                )
-                                raise StreamFailure(f"WS_DISCONNECTED_{detail}")
+                                code = frame.close_code
+                                reason = f"WS_DISCONNECTED_{code}" if code else "WS_DISCONNECTED"
+                                raise StreamFailure(reason)
                             if frame.kind == "PING":
                                 if not isinstance(frame.data, bytes):
                                     raise StreamFailure("WS_INVALID_PING")
@@ -379,8 +395,9 @@ class SocketManager:
                                 if type(payload.get("id")) is int and payload["id"] == request_id:
                                     if payload["result"] is not None:
                                         raise StreamFailure("WS_INVALID_ACK")
-                                    acknowledged = True
-                                    last_valid = self.monotonic()
+                                    if not acknowledged:
+                                        acknowledged = True
+                                        acknowledged_at = last_valid = self.monotonic()
                                 continue
                             if not acknowledged:
                                 continue
@@ -401,6 +418,7 @@ class SocketManager:
                                     sequence=sequence,
                                     eligible=self.eligible(),
                                     max_future=self.max_future,
+                                    closed_only=True,
                                 )
                             except ValueError as error:
                                 stream = StreamSpec(name)
@@ -420,11 +438,14 @@ class SocketManager:
                             if events:
                                 last_valid = self.monotonic()
                                 invalidated.discard(name)
+                                if self.data_timeout is not None:
+                                    last_by_stream[name] = last_valid
+                                # Back off consecutive connections that fail to
+                                # deliver data, including ACK-only connections.
+                                if self.data_timeout is None or subscribed <= last_by_stream.keys():
+                                    failures = 0
                             for event in events:
                                 self.on_event(event)
-                            if elapsed >= 60:
-                                failures = 0
-                        pending.cancel()
                 except StreamFailure as error:
                     self.reason, retry_after = str(error), error.retry_after
                     failures += 1
@@ -440,6 +461,8 @@ class SocketManager:
                     failures += 1
                     self.failures += 1
                 finally:
+                    if pending is not None:
+                        pending.cancel()
                     self.on_state("STALE", self.generation)
                 if not stop.is_set():
                     self.reconnects += 1

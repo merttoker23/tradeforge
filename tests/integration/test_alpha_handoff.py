@@ -1,5 +1,6 @@
 """Actual persisted candle revisions retain feature/alpha point-in-time identity."""
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -7,7 +8,10 @@ from sqlalchemy import text
 
 from tests.unit.test_alpha_handoff import feed_for
 from tests.unit.test_momentum_alpha import change, evidence
+from tests.unit.test_reversal_alpha import sample as reversal_sample
+from tests.unit.test_reversal_alpha import with_frame
 from tradeforge.domain.common import DataQuality
+from tradeforge.domain.decision import Side
 from tradeforge.domain.market import Timeframe
 from tradeforge.market.market_state import BarView
 from tradeforge.market.storage import save_view
@@ -102,22 +106,53 @@ def test_bounded_medium_history_keeps_complete_hourly_confirmation(
     assert all(bar.close_at <= at for bar in rows[0].higher_bars)
 
 
-def test_hourly_window_reaches_durable_armed_candidate_with_current_evidence(migrated):
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("family", ["MOMENTUM", "REVERSAL"])
+def test_hourly_window_reaches_durable_armed_candidate_with_current_evidence(
+    migrated, monkeypatch, side, family
+):
     from decimal import Decimal
 
+    from apps.quant_core import runtime
     from tests.intelligence_fixtures import engine, frame, observation
+    from tradeforge.domain.market import RegimeLabel
+    from tradeforge.intelligence.runtime import QuantWorker
     from tradeforge.runtime.analysis import AutonomousAnalysis
 
     detector, previous = engine(), None
-    medium = [observation(i, "ETHUSDT", 0.004).current for i in range(-94, 1)]
+    sign = 1 if side is Side.LONG else -1
+    medium = [observation(i, "ETHUSDT", sign * 0.004).current for i in range(-94, 1)]
     for index in range(1, 34):
         btc = 0.001 + (index % 7) * 0.0002
-        previous = frame(index, moves=(btc, btc + 0.003, btc + 0.001), previous=previous)
+        previous = frame(
+            index,
+            moves=tuple(sign * value for value in (btc, btc + 0.003, btc + 0.001)),
+            previous=previous,
+        )
         features = detector.update(previous)
         medium.append(
             next(r.current for r in previous.observations if r.instrument.symbol == "ETHUSDT")
         )
-    sample = evidence()
+    sample = evidence(side) if family == "MOMENTUM" else reversal_sample(side)
+    if family == "REVERSAL":
+        medium = [
+            change(bar, open=Decimal(100), high=Decimal(101), low=Decimal(99), close=Decimal(100))
+            for bar in medium
+        ]
+        observations = tuple(
+            change(row, previous=medium[-2], current=medium[-1])
+            if row.instrument == sample.instrument
+            else row
+            for row in features.frame.observations
+        )
+        features = with_frame(features, change(features.frame, observations=observations))
+        rows = tuple(
+            change(row, direction=0, efficiency=0.0) if row.instrument == sample.instrument else row
+            for row in features.features
+        )
+        features = change(
+            features, features=rows, state=change(features.state, label=RegimeLabel.RANGE)
+        )
     at = features.frame.as_of
     delay = at - sample.as_of
     scale = medium[-1].close / sample.setup_bars[-1].close
@@ -159,15 +194,33 @@ def test_hourly_window_reaches_durable_armed_candidate_with_current_evidence(mig
         },
     )
     feed = feed_for(change(sample, market=market, book=book, flow=flow, as_of=at))
+    if family == "REVERSAL":
+        flow_times = ("source_at", "observed_at", "as_of", "source_start", "source_end")
+        old = change(
+            sample.previous_flow,
+            **{name: getattr(sample.previous_flow, name) + delay for name in flow_times},
+        )
+        feed["deep"][0]["previous_flow"] = old.model_dump(mode="json")
     for timeframe, bars in ((Timeframe.M15, tuple(medium)), (Timeframe.M5, setup)):
         save_view(
             migrated,
             BarView(sample.instrument, timeframe, at, bars, DataQuality.OK),
         )
-    inputs = alpha_inputs(migrated, features, feed)
-    worker = AutonomousAnalysis(migrated, clock=lambda: at)
-    assert worker.evaluate(inputs) == 1
-    assert any(r["state"] == "ARMED" for r in worker.state["symbol_results"])
+    worker = QuantWorker(migrated, clock=lambda: at)
+    worker.detector.latest = features
+    worker.state = worker._state("ANALYZED", True, 1)
+    analysis = AutonomousAnalysis(migrated, clock=lambda: at)
+
+    async def handoff(*args, **kwargs):
+        return feed
+
+    monkeypatch.setattr(runtime, "fetch_memory", handoff)
+    asyncio.run(runtime.run_cycle(worker, analysis, object(), None, refresh_features=False))
+    assert analysis.state["candidate_count"] == 1
+    assert any(
+        r["state"] == "ARMED" and r["strategy"] == family and r["side"] == side.value
+        for r in analysis.state["symbol_results"]
+    )
     with migrated.transaction() as connection:
         assert connection.scalar(text("SELECT count(*) FROM decision_lifecycle")) == 3
         assert connection.scalar(text("SELECT count(*) FROM execution_intents")) == 0

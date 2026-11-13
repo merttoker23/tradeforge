@@ -34,15 +34,21 @@ class Timeframe(StrEnum):
 
     @property
     def seconds(self) -> int:
-        return {
-            self.M1: 60,
-            self.M5: 300,
-            self.M15: 900,
-            self.H1: 3600,
-            self.H4: 14400,
-            self.H12: 43200,
-            self.D1: 86400,
-        }[self]
+        # This property is on the readiness hot path for every retained bar
+        # series; constructing the mapping on each access dominated sampling.
+        if self is Timeframe.M1:
+            return 60
+        if self is Timeframe.M5:
+            return 300
+        if self is Timeframe.M15:
+            return 900
+        if self is Timeframe.H1:
+            return 3600
+        if self is Timeframe.H4:
+            return 14400
+        if self is Timeframe.H12:
+            return 43200
+        return 86400
 
 
 class MarketQuote(InstrumentEvent):

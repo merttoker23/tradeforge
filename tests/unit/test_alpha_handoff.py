@@ -1,6 +1,7 @@
 """Point-in-time handoff never mixes revised features or hides rejected inputs."""
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,7 +161,10 @@ def test_memory_reports_selected_deep_symbol_waiting_for_canonical_recovery(reas
     )
     result = memory_payload(gateway, persistence)
     assert result["deep"] == []
-    assert result["deep_status"] == [{"symbol": "ETHUSDT", "ready": False, "reason": reason}]
+    (row,) = result["deep_status"]
+    assert (row["symbol"], row["ready"], row["reason"]) == ("ETHUSDT", False, reason)
+    assert row["book_state"] == "READY"
+    assert row["flow_quality"] == "OK"
     diagnostics = {}
     assert alpha_inputs(None, sample.features, result, diagnostics=diagnostics) == ()
     assert diagnostics["input_rejections"] == [{"symbol": "ETHUSDT", "reason": reason}]
@@ -222,3 +226,54 @@ def test_handoff_counts_fresh_composite_evidence_without_changed_only_ticker_cov
     assert memory_payload(gateway, persistence)["status"]["analysis_coverage_ready"] is True
     at[0] += timedelta(seconds=16)
     assert memory_payload(gateway, persistence)["status"]["analysis_coverage_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("environment", "reason", "source_env", "age", "ready"),
+    [
+        ("testnet", "STREAMS_STALE", "testnet", 2, True),
+        ("testnet", "STREAMS_STALE", "testnet", 16, False),
+        ("testnet", "STREAMS_STALE", "mainnet", 2, False),
+        ("testnet", "CLOCK_UNSAFE", "testnet", 2, False),
+        ("testnet", "UNIVERSE_STALE", "testnet", 2, False),
+        ("live", "STREAMS_STALE", "mainnet", 2, False),
+    ],
+)
+def test_testnet_handoff_uses_fresh_rest_coverage_during_global_websocket_gap(
+    environment, reason, source_env, age, ready
+):
+    from tradeforge.runtime.market_link import memory_payload
+
+    sample = evidence()
+    at = sample.as_of + timedelta(seconds=age)
+    markets = tuple(
+        change(sample.market, symbol=symbol, environment=source_env, source="binance:rest")
+        for symbol in ("ETHUSDT", "BTCUSDT", "SOLUSDT", "BNBUSDT")
+    )
+    gateway = SimpleNamespace(
+        environment=environment,
+        clock=lambda: at,
+        _latest={},
+        _generations={},
+        eligible={m.symbol for m in markets} | {"XRPUSDT"},
+        canonical=SimpleNamespace(books={}, flows={}),
+        clock_sync=SimpleNamespace(ready=lambda *args: reason != "CLOCK_UNSAFE"),
+        monotonic=lambda: 0,
+        status=lambda: {
+            "data_ready": False,
+            "reason": reason,
+            "websocket_state": "NO_DATA",
+        },
+    )
+    persistence = SimpleNamespace(
+        rest_samples=markets, markets=lambda *args: (), display_quotes=lambda at: ()
+    )
+    for selected in (None, frozenset({"ETHUSDT"})):
+        payload = memory_payload(gateway, persistence, symbols=selected)
+        assert payload["status"]["data_ready"] is ready
+        assert payload["status"]["analysis_coverage_ready"] is ready
+        assert payload["status"]["websocket_state"] == "NO_DATA"
+        if ready:
+            assert payload["status"]["market_data_source"] == "REST_FALLBACK"
+        if selected is not None:
+            assert all(row["symbol"] in selected for row in payload["markets"])

@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from types import MappingProxyType
@@ -239,3 +240,16 @@ def test_flow_overflow_and_bad_payload_fail_closed():
     with pytest.raises(ValueError):
         flow.ingest(event("aggTrade", last=3, second=3, maker=1))
     assert flow.snapshot(START + timedelta(seconds=3)).validity is not DataQuality.OK
+
+
+def test_previous_window_includes_late_receipt_known_at_evaluation():
+    flow = TradeFlow(instrument(), period_seconds=10)
+    flow.begin(1, START)
+    boundary = START + timedelta(seconds=10)
+    now = boundary + timedelta(milliseconds=500)
+    flow.ingest(replace(event("aggTrade", last=1, second=10), received_at=now))
+    assert flow.snapshot(boundary).validity is DataQuality.STALE
+    previous = flow.snapshot(boundary, known_at=now)
+    assert previous.validity is DataQuality.OK
+    assert previous.source_end == boundary and previous.observed_at == now
+    assert flow.snapshot(boundary + timedelta(seconds=10)).count == 0

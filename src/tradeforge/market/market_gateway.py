@@ -403,6 +403,11 @@ class MarketGateway:
             "canonical_ready": self.canonical.ready(now),
             "clock_attempts": self.clock_attempts,
             "clock_failures": self.clock_failures,
+            "clock_reason": (
+                self.clock_sync.reason
+                if self.clock_sync.reason != "OK" or reason != "CLOCK_UNSAFE"
+                else "CLOCK_SAMPLE_STALE"
+            ),
             "socket_reconnects": self.socket_reconnects + self.active_socket_reconnects,
             "socket_failures": self.socket_failures + self.active_socket_failures,
             "socket_reason": self.last_socket_reason,
@@ -667,6 +672,11 @@ class MarketGateway:
                                 clock=self.clock,
                                 monotonic=self.monotonic,
                                 ack_timeout=15 if self.environment == "testnet" else 5,
+                                # Only the all-market streams are expected to
+                                # deliver regularly even when pairs are quiet.
+                                data_timeout=self.stale_after
+                                if all(s.name in GLOBAL_STREAMS for s in group)
+                                else None,
                                 # The clock policy already tolerates this skew. The
                                 # stream decoder must use the same bound, or a
                                 # trusted clock would reject every event.

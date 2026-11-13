@@ -4,20 +4,19 @@ Only an armed setup is published. Candidate evidence is retained once; high
 frequency book/flow observations remain in the gateway's bounded memory.
 """
 
-from bisect import bisect_right
-from collections import Counter
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import text
 
-from tradeforge.alpha.base import MomentumInput
+from tradeforge.alpha.base import AlphaResult, MomentumInput
 from tradeforge.alpha.momentum import MomentumAlpha
 from tradeforge.alpha.reversal import ReversalAlpha, ReversalInput
-from tradeforge.decision.provenance import Discovery
+from tradeforge.decision.provenance import Discovery, candidate_decision_id
 from tradeforge.decision.state_machine import Command
 from tradeforge.decision.storage import DecisionService
 from tradeforge.domain.decision import DecisionState, Side
@@ -44,6 +43,7 @@ class NoTradeReason(StrEnum):
     FLOW_UNAVAILABLE = "FLOW_UNAVAILABLE"
     FLOW_OPPOSED = "FLOW_OPPOSED"
     MICROSTRUCTURE_DESYNC = "MICROSTRUCTURE_DESYNC"
+    FLOW_WINDOW_GAP = "FLOW_WINDOW_GAP"
     FLOW_NOT_STABILIZED = "FLOW_NOT_STABILIZED"
     INSTRUMENT_CAPACITY_EXHAUSTED = "INSTRUMENT_CAPACITY_EXHAUSTED"
     EXPIRED = "EXPIRED"
@@ -62,6 +62,8 @@ class NoTradeReason(StrEnum):
     INVALID_TARGET_GEOMETRY = "INVALID_TARGET_GEOMETRY"
     SETUP_NOT_ARMED = "SETUP_NOT_ARMED"
     OTHER_NO_TRADE = "OTHER_NO_TRADE"
+    RETURN_SHOCK = "RETURN_SHOCK"
+    FUNDING_STRESS = "FUNDING_STRESS"
 
 
 class AutonomousAnalysis:
@@ -78,7 +80,9 @@ class AutonomousAnalysis:
         # Latest per-symbol outcome, retaining unaffected pairs when a wakeup
         # re-evaluates only the changed symbols. There is no analysis cycle:
         # every eligible pair is re-evaluated continuously as evidence arrives.
-        self._summaries: dict[str, dict[str, object]] = {}
+        self._summaries: OrderedDict[str, dict[str, object]] = OrderedDict()
+        self._hourly: deque[tuple[datetime, Counter[str], int]] = deque(maxlen=61)
+        self._process_reasons: Counter[str] = Counter()
         self._last_batch_symbol = ""
         self.state: dict[str, object] = {
             "candidate_count": 0,
@@ -94,10 +98,18 @@ class AutonomousAnalysis:
             "execution_ready": False,
         }
 
-    def next_batch(self, ready: frozenset[str], *, limit: int = 24) -> frozenset[str]:
-        """Rotate over ready pairs so each batch fits the microstructure TTL."""
-        ordered = sorted(ready)
-        start = bisect_right(ordered, self._last_batch_symbol)
+    def next_batch(
+        self, ready: frozenset[str] | tuple[str, ...], *, limit: int = 24
+    ) -> frozenset[str]:
+        """Rotate fairly; retain ranked market-handoff order when available."""
+        # Existing set callers keep a stable sorted order. Gateway tuples are
+        # ranked by surveillance allocation and must not be re-sorted.
+        ordered = sorted(ready) if isinstance(ready, frozenset) else list(dict.fromkeys(ready))
+        start = (
+            (ordered.index(self._last_batch_symbol) + 1) % len(ordered)
+            if ordered and self._last_batch_symbol in ordered
+            else 0
+        )
         batch = (ordered[start:] + ordered[:start])[:limit]
         if batch:
             self._last_batch_symbol = batch[-1]
@@ -119,7 +131,7 @@ class AutonomousAnalysis:
         evaluated = 0
         symbol_results = []
         symbol_summaries: dict[str, dict[str, object]] = {}
-        evidence = {}
+        evidence: dict[UUID, MomentumInput] = {}
         for sample in inputs:
             symbol = sample.instrument.symbol
             summary = symbol_summaries.setdefault(
@@ -157,6 +169,7 @@ class AutonomousAnalysis:
                             if candidate and candidate.take_profit_proposal is not None
                             else None,
                             "expires_at": candidate.expires_at.isoformat() if candidate else None,
+                            "trace": evaluation_trace(sample, strategy, side, at, result),
                         }
                     )
                     if candidate is None or candidate.state is not DecisionState.ARMED:
@@ -177,6 +190,7 @@ class AutonomousAnalysis:
                         summary["decision"] = side.value
                         summary["strategy"] = strategy
                         summary["reasons"] = list(result.reason_codes)
+                        summary["expires_at"] = candidate.expires_at.isoformat()
                     discovery = Discovery(
                         candidate=candidate,
                         cluster="portfolio",
@@ -187,6 +201,60 @@ class AutonomousAnalysis:
                     discoveries.append(discovery)
                     evidence[discovery.decision_id] = sample
         service = DecisionService(self.db)
+        count = self._journal(service, discoveries, evidence, at) if discoveries else 0
+        self.momentum, self.reversal = momentum, reversal
+        if inputs:
+            self.last_analysis_at = at.isoformat()
+            self.analysis_cycle_total = min(2**31 - 1, self.analysis_cycle_total + 1)
+        self.evaluation_total = min(2**31 - 1, self.evaluation_total + evaluated)
+        for code, value in counts.items():
+            self._process_reasons[code] = min(2**31 - 1, self._process_reasons[code] + value)
+        minute = at.replace(second=0, microsecond=0)
+        if not self._hourly or self._hourly[-1][0] != minute:
+            self._hourly.append((minute, Counter(), 0))
+        _, reasons, total = self._hourly[-1]
+        reasons.update(counts)
+        self._hourly[-1] = (minute, reasons, total + evaluated)
+        while self._hourly and self._hourly[0][0] <= minute - timedelta(hours=1):
+            self._hourly.popleft()
+        hour_counts: Counter[str] = Counter()
+        for _, reasons, _ in self._hourly:
+            hour_counts.update(reasons)
+        if symbols is None:
+            self._summaries.clear()
+        for symbol, row in symbol_summaries.items():
+            self._summaries[symbol] = row
+            self._summaries.move_to_end(symbol)
+        while len(self._summaries) > 1024:
+            self._summaries.popitem(last=False)
+        self.state = {
+            "candidate_count": count,
+            "reason_counts": dict(counts),
+            "process_reason_counts": dict(self._process_reasons),
+            "last_hour": {
+                "reason_counts": dict(hour_counts),
+                "evaluated_count": sum(total for _, _, total in self._hourly),
+                "as_of": at.isoformat(),
+            },
+            "evaluated_count": evaluated,
+            "analysis_symbols": len(inputs),
+            "analyzed_symbols": len(symbol_summaries),
+            "evaluation_total": self.evaluation_total,
+            "analysis_cycle_total": self.analysis_cycle_total,
+            "last_analysis_at": self.last_analysis_at,
+            "symbol_results": symbol_results[:64],
+            "symbol_summaries": list(self._summaries.values()),
+            "execution_ready": False,
+        }
+        return count
+
+    def _journal(
+        self,
+        service: DecisionService,
+        discoveries: list[Discovery],
+        evidence: dict[UUID, MomentumInput],
+        at: datetime,
+    ) -> int:
         count = 0
         with self.db.transaction() as c:
             c.execute(text("SELECT pg_advisory_xact_lock(74202010)"))
@@ -230,26 +298,37 @@ class AutonomousAnalysis:
                     },
                 )
                 count += 1
-        self.momentum, self.reversal = momentum, reversal
-        if inputs:
-            self.last_analysis_at = at.isoformat()
-            self.analysis_cycle_total += 1
-        self.evaluation_total += evaluated
-        if symbols is None:
-            self._summaries = dict(symbol_summaries)
-        else:
-            self._summaries.update(symbol_summaries)
-        self.state = {
-            "candidate_count": count,
-            "reason_counts": dict(counts),
-            "evaluated_count": evaluated,
-            "analysis_symbols": len(inputs),
-            "analyzed_symbols": len(symbol_summaries),
-            "evaluation_total": self.evaluation_total,
-            "analysis_cycle_total": self.analysis_cycle_total,
-            "last_analysis_at": self.last_analysis_at,
-            "symbol_results": symbol_results[:64],
-            "symbol_summaries": list(self._summaries.values()),
-            "execution_ready": False,
-        }
         return count
+
+
+def evaluation_trace(
+    sample: MomentumInput, strategy: str, side: Side, at: datetime, result: AlphaResult
+) -> dict[str, object]:
+    candidate = result.candidate
+    blockers = result.failed_gates or (result.reason_codes if candidate is None else ())
+    market = sample.market
+
+    def age(source: datetime) -> float:
+        return round((at - source).total_seconds() * 1000, 3)
+
+    return {
+        "trace_id": str(uuid5(market.event_id, f"{strategy}/{side.value}/{at.isoformat()}")),
+        "decision_id": str(candidate_decision_id(candidate))
+        if candidate and candidate.state is DecisionState.ARMED
+        else None,
+        "market_event_at": market.source_at.isoformat(),
+        "feature_source_at": sample.features.frame.source_at.isoformat(),
+        "evaluation_at": at.isoformat(),
+        "regime": sample.features.state.label.value,
+        "bar_age_ms": {
+            bars[-1].timeframe.value: age(bars[-1].close_at)
+            for bars in (sample.setup_bars, sample.medium_bars, sample.higher_bars)
+            if bars
+        },
+        "quote_age_ms": age(market.book_source_at or market.source_at),
+        "book_age_ms": age(sample.book.source_at),
+        "flow_age_ms": age(sample.flow.source_end),
+        "stage": candidate.state.value if candidate else "ALPHA_REJECTED",
+        "first_blocker": blockers[0] if blockers else None,
+        "failed_gates": list(blockers),
+    }

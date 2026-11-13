@@ -10,6 +10,7 @@ from pathlib import Path
 from aiohttp import web
 
 from tradeforge.bootstrap import main as foundation_main
+from tradeforge.config.policy import RuntimeMode
 from tradeforge.config.settings import load_settings
 from tradeforge.market.clock_sync import ClockSync
 from tradeforge.market.exchange_info import ExchangeInfoClient
@@ -153,7 +154,10 @@ async def serve(
     from tradeforge.runtime.binance_environment import select_environment
 
     active = select_environment(database)
-    if internal_token is not None:
+    settings = load_settings()
+    if settings.mode is RuntimeMode.TESTNET and active.name != "testnet":
+        raise ValueError("TESTNET_ENVIRONMENT_MISMATCH")
+    if internal_token is not None or settings.mode is RuntimeMode.TESTNET:
         database.pin_environment(active.revision)
     gateway = MarketGateway(
         ClockSync(max_rtt=5.0, max_skew=3.0),
@@ -192,7 +196,7 @@ async def serve(
         # local dashboard has no token file, so its verified loopback GET
         # requests may share this route alongside the bearer calls.
         add_memory_route(app, gateway, persistence, internal_token, loopback=loopback)
-    add_market_events_route(app, market_events, token=internal_token)
+    add_market_events_route(app, market_events, token=internal_token, loopback=loopback)
     runner = web.AppRunner(app, access_log=None)
     from tradeforge.runtime.surveillance import RuntimeSurveillance
 
@@ -273,7 +277,8 @@ async def serve(
                         {
                             "service": "market_gateway",
                             "phase": "PHASE_05",
-                            "mode": "paper",
+                            "mode": settings.mode.value,
+                            "environment": active.name,
                             "live": False,
                             "orders_enabled": False,
                         }
@@ -371,12 +376,21 @@ def main() -> int:
             )
         if len(set((*args.watch, *args.deep))) > 256:
             raise ValueError("CANONICAL_SYMBOL_BUDGET")
-        if settings.mode.value != "paper" or settings.live or not 0 <= args.port <= 65535:
-            raise ValueError("GATEWAY_PAPER_LOCAL_REQUIRED")
+        if (
+            settings.mode not in {RuntimeMode.PAPER, RuntimeMode.TESTNET}
+            or not 0 < args.port <= 65535
+        ):
+            raise ValueError("GATEWAY_LOCAL_MODE_INVALID")
         token = local_token_file(args.gateway_token_file) if args.gateway_token_file else None
         database = local_database(args.database_url_file)
     except Exception:
         parser.error("GATEWAY_LOCAL_CONFIG_INVALID")
+    # Local Testnet needs a bounded evidence tier even when surveillance has
+    # no ranked candidates yet. An explicit full-depth request keeps its scope.
+    local_testnet_batch = settings.mode is RuntimeMode.TESTNET and not args.full_depth
+    depth_batch_size = args.depth_batch_size
+    if local_testnet_batch and depth_batch_size is None:
+        depth_batch_size = 24
     try:
         asyncio.run(
             serve(
@@ -386,12 +400,16 @@ def main() -> int:
                 deep=tuple(args.deep),
                 internal_token=token,
                 loopback=True,
-                full_depth=args.full_depth,
-                depth_batch_size=args.depth_batch_size,
+                full_depth=args.full_depth or local_testnet_batch,
+                depth_batch_size=depth_batch_size,
             )
         )
     except KeyboardInterrupt:
         pass
+    except ValueError as error:
+        parser.error(
+            str(error) if str(error) == "TESTNET_ENVIRONMENT_MISMATCH" else "GATEWAY_FAILED_CLOSED"
+        )
     except Exception:
         parser.error("GATEWAY_FAILED_CLOSED")
     finally:

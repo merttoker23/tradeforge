@@ -81,6 +81,7 @@ services:
       <<: *environment
       TRADEFORGE_MODE: ${TF_MODE:-paper}
       TF_AUTO_ORDERS: ${TF_AUTO_ORDERS:-false}
+      TF_TESTNET_TRIAL: ${TF_TESTNET_TRIAL:-false}
     secrets: [quant_password, gateway_token]
     networks: [state, egress]
     volumes: [postgres_state:/postgres-volume:ro]

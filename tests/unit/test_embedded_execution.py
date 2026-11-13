@@ -9,12 +9,11 @@ import pytest
 from tradeforge.runtime.auto_execution import execution_cycle, serve
 
 
-def test_execution_requires_explicit_testnet_and_trial():
+def test_execution_requires_explicit_testnet_and_entry_opt_in():
     for environment, entries, trial in (
         ("live", True, True),
         ("paper", True, True),
         ("testnet", False, True),
-        ("testnet", True, False),
     ):
         with pytest.raises(ValueError, match="EXPLICIT_TESTNET_AUTO_EXECUTION_REQUIRED"):
             asyncio.run(

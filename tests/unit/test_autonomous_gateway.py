@@ -55,10 +55,13 @@ def test_handoff_builds_only_one_bounded_book_per_ready_symbol():
         },
         flows={
             sample.instrument.symbol: SimpleNamespace(
-                validity_at=lambda at: sample.flow.validity, snapshot=lambda at: sample.flow
+                validity_at=lambda at: sample.flow.validity,
+                snapshot=lambda at, **kwargs: sample.flow,
+                period_seconds=60,
             )
         },
         symbol_ready=ready,
+        bar_rejections=lambda *_: (),
         storage_ready=True,
         admission_ready=True,
     )

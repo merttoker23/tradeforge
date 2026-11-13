@@ -51,7 +51,7 @@ const capturedChartBody=chartBody;await new Promise(setImmediate);if(fetchGate)a
   return {get,calls,context,data,timers,intervals,releaseSnapshot,chartUpdates,pushSnapshot:()=>socketAdapter.handlers.onSnapshot(data),get maxInFlight(){return maxInFlight;},get busyRejections(){return busyRejections;},get maxDbInFlight(){return maxDbInFlight;},setFetchGate:gate=>{fetchGate=gate;},setChartBody:b=>{chartBody=b;},setChartOffline:v=>{chartOffline=v;},setSupervisor:s=>{supervisor=s;},setConfigured:c=>{configured=c;},setPrice:p=>{price=p;},setMembers:m=>{members=m;},setOffline:value=>{offline=value;}};
 }
 test("normal startup uses the read-only observer without bearer authority",async()=>{
-  const a=await app();assert.ok(a.calls[0].path.startsWith("/api/market/symbols"));assert.equal(a.calls[0].options.headers?.Authorization,undefined);assert.equal(a.get("equity").textContent,"1,000.00");assert.equal(a.get("decision").textContent,"NO_TRADE");
+  const a=await app();assert.ok(a.calls[0].path.startsWith("/api/market/symbols"));assert.equal(a.calls[0].options.headers?.Authorization,undefined);assert.equal(a.get("equity").textContent,"1,000.00");assert.equal(a.get("decision").textContent,"BEKLENİYOR");
 });
 
 test("overview reports server testnet authority separately from the read-only session",async()=>{
@@ -63,6 +63,22 @@ test("overview reports server testnet authority separately from the read-only se
   assert.equal(a.get("execution-status").textContent,"Emir koşulları hazır");
   a.context.stale("Disconnected");
   assert.notEqual(a.get("execution-status").textContent,"Emir koşulları hazır");
+});
+
+test("overview identifies fresh Testnet REST evidence during a market WebSocket gap",async()=>{
+  const a=await app();
+  a.data.sections.workers={status:"OK",data:[
+    {service:"market_gateway",freshness:"OK",data_ready:false},
+    {service:"execution_core",freshness:"OK"}
+  ]};
+  a.data.live_analysis={connections:{binance_websocket:"NO_DATA",binance_rest:"CONNECTED"}};
+  a.data.execution_readiness={ready:true,entries_enabled:true,market_ready:true,market_data_source:"REST_FALLBACK"};
+  a.context.render(a.data);
+  assert.equal(a.get("data-status").textContent,"Güncel · Testnet REST");
+  assert.equal(a.get("execution-status").textContent,"Emir koşulları hazır");
+  a.data.sections.workers.data[1].freshness="STALE";
+  a.context.render(a.data);
+  assert.equal(a.get("data-status").textContent,"Doğrulanmadı");
 });
 
 test("a watching setup explains its stage rather than claiming all entries are disabled",async()=>{
@@ -96,7 +112,7 @@ test("transport loss retains historical values but revokes current decisions",as
   a.context.render(a.data);assert.equal(a.get("decision").textContent,"LONG");
   a.context.stale("Disconnected");
   assert.equal(a.get("equity").textContent,"1,000.00");
-  assert.equal(a.get("decision").textContent,"NO_TRADE");
+  assert.equal(a.get("decision").textContent,"BEKLENİYOR");
   assert.match(a.get("account-note").textContent,/Son doğrulanmış/);
 });
 
@@ -349,9 +365,12 @@ test("cycle, new analysis, source and strategy evaluation have distinct evidence
 test("an armed strategy evaluation only claims trigger watching while current and compatible",async()=>{
   const a=await app();
   a.data.execution_readiness={ready:true,entries_enabled:true,reason:"READY",blockers:[]};a.data.analysis_readiness={ready:true};
-  const quant={service:"quant_core",freshness:"OK",analysis_ready:true,reason:"ANALYZED",regime_label:"RANGE",evaluated_count:1,symbol_results:[{symbol:"BTCUSDT",strategy:"REVERSAL",state:"ARMED"}]};
+  const quant={service:"quant_core",freshness:"OK",analysis_ready:true,reason:"ANALYZED",regime_label:"RANGE",evaluated_count:1,symbol_results:[{symbol:"BTCUSDT",strategy:"REVERSAL",state:"ARMED",as_of:new Date().toISOString()}]};
   a.data.sections.workers={status:"OK",data:[quant]};a.context.render(a.data);
   assert.match(a.get("algorithm-headline").textContent,/Tetik izleniyor/);
+  quant.symbol_results[0].as_of=new Date(Date.now()-6000).toISOString();a.context.render(a.data);
+  assert.doesNotMatch(a.get("algorithm-headline").textContent,/Tetik izleniyor/);
+  quant.symbol_results[0].as_of=new Date().toISOString();
   quant.evaluated_count=0;a.context.render(a.data);
   assert.doesNotMatch(a.get("algorithm-headline").textContent,/Tetik izleniyor/);
   quant.evaluated_count=1;quant.freshness="STALE";a.context.render(a.data);
@@ -444,4 +463,16 @@ test("coverage cannot be inferred from symbol counts if the stream clock is not 
   assert.equal(a.get("ov-coverage").textContent,"—");
   assert.equal(a.get("engine-pair-scan").textContent,"0");
   assert.equal(a.get("engine-pair-analyzed").textContent,"—");
+});
+
+
+test("decision panel shows an armed reversal over an earlier NO_TRADE momentum result",async()=>{
+  const a=await app();const now=new Date().toISOString();
+  a.data.sections.workers={status:"OK",data:[{service:"quant_core",freshness:"OK",regime_label:"RANGE",symbol_results:[
+    {symbol:"BTCUSDT",state:"NO_TRADE",strategy:"MOMENTUM",side:"LONG",as_of:now,reasons:["REGIME_NOT_ALLOWED"]},
+    {symbol:"BTCUSDT",state:"ARMED",strategy:"REVERSAL",side:"SHORT",as_of:now,expires_at:new Date(Date.now()+600000).toISOString(),reasons:["SWING_SWEEP_RECLAIM"]}
+  ]}]};
+  a.context.render(a.data);
+  assert.equal(a.get("decision").textContent,"TETİK BEKLİYOR");
+  assert.match(a.get("decision-explanation").textContent,/Dönüş/);
 });

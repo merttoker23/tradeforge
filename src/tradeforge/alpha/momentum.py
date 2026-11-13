@@ -9,6 +9,7 @@ from tradeforge.alpha.base import (
     AlphaResult,
     MomentumInput,
     MomentumPolicy,
+    evidence_blockers,
     instrument_stress,
 )
 from tradeforge.domain.common import DataQuality, utc
@@ -32,65 +33,53 @@ class MomentumAlpha:
         self._emitted: dict[str, tuple[datetime, int]] = {}
         self._latest: dict[tuple[str, ...], tuple[datetime, str]] = {}
 
-    def _gate(self, d: MomentumInput, side: Side, now: datetime) -> str | None:
+    def _blockers(self, d: MomentumInput, side: Side, now: datetime) -> tuple[str, ...]:
         p, f = self.policy, d.features
-        if d.quality is not DataQuality.OK:
-            return "DATA_UNAVAILABLE"
-        for bars in (d.setup_bars, d.medium_bars, d.higher_bars):
-            if len(bars) < p.minimum_history:
-                return "INSUFFICIENT_HISTORY"
-            # Allow the most recent CLOSED higher period, never its in-progress successor.
-            if (now - bars[-1].close_at).total_seconds() >= bars[-1].timeframe.seconds:
-                return "STALE_BARS"
-        if (
-            now - f.state.source_at
-        ).total_seconds() > f.policy.max_age_periods * f.frame.timeframe.seconds:
-            return "STALE_REGIME"
-        universe = f.frame.universe
-        if (
-            d.instrument not in universe.eligible
-            or (now - universe.observed_at).total_seconds() > f.policy.universe_ttl_seconds
-        ):
-            return "UNIVERSE_UNAVAILABLE"
+        blockers = evidence_blockers(d, now, p.minimum_history)
         if f.state.label is not RegimeLabel.TREND_EXPANSION:
-            return "REGIME_NOT_ALLOWED"
+            blockers.append("REGIME_NOT_ALLOWED")
         rows = [r for r in f.frame.observations if r.instrument == d.instrument]
         features = [r for r in f.features if r.instrument == d.instrument]
         if len(rows) != 1 or len(features) != 1 or rows[0].quality is not DataQuality.OK:
-            return "FEATURE_UNAVAILABLE"
-        feature = features[0]
-        stress = instrument_stress(d)
-        if stress:
-            return stress
-        if (
-            feature.sample_count < f.policy.minimum_history
-            or feature.beta is None
-            or feature.relative_return is None
-        ):
-            return "RELATIVE_STRENGTH_UNKNOWN"
+            blockers.append("FEATURE_UNAVAILABLE")
         sign = 1 if side is Side.LONG else -1
-        if feature.direction != sign or any(
-            not _trend(bars, sign, p.trend_efficiency) for bars in (d.medium_bars, d.higher_bars)
-        ):
-            return "TREND_MISALIGNED"
-        if sign * feature.relative_return <= 0:
-            return "RELATIVE_STRENGTH_OPPOSED"
+        if len(features) == 1:
+            feature = features[0]
+            stress = instrument_stress(d)
+            if stress:
+                blockers.append(stress)
+            relative_ready = (
+                feature.sample_count >= f.policy.minimum_history
+                and feature.beta is not None
+                and feature.relative_return is not None
+            )
+            if not relative_ready:
+                blockers.append("RELATIVE_STRENGTH_UNKNOWN")
+            if feature.direction != sign or any(
+                not _trend(bars, sign, p.trend_efficiency)
+                for bars in (d.medium_bars, d.higher_bars)
+            ):
+                blockers.append("TREND_MISALIGNED")
+            if feature.relative_return is not None and sign * feature.relative_return <= 0:
+                blockers.append("RELATIVE_STRENGTH_OPPOSED")
         m, book, flow = d.market, d.book, d.flow
         if not m.costs_fresh(now, p.micro_age_seconds) or not m.volume_fresh(
             now, p.micro_age_seconds
         ):
-            return "MARKET_UNAVAILABLE"
+            blockers.append("MARKET_UNAVAILABLE")
         if book.stream_state is not StreamState.READY or any(
             (now - at).total_seconds() > p.micro_age_seconds
             for at in (book.source_at, book.captured_at)
         ):
-            return "BOOK_UNAVAILABLE"
+            blockers.append("BOOK_UNAVAILABLE")
         spread = 20000 * (m.best_ask - m.best_bid) / (m.best_ask + m.best_bid)
-        book_spread = (
-            20000 * (book.asks[0][0] - book.bids[0][0]) / (book.asks[0][0] + book.bids[0][0])
-        )
+        book_spread = Decimal(0)
+        if book.asks and book.bids:
+            book_spread = (
+                20000 * (book.asks[0][0] - book.bids[0][0]) / (book.asks[0][0] + book.bids[0][0])
+            )
         if max(spread, book_spread) > p.spread_bps:
-            return "SPREAD_GATE"
+            blockers.append("SPREAD_GATE")
         # Count only executable nearby liquidity, not distant large spoof-like levels.
         mid = (m.best_bid + m.best_ask) / 2
         band = mid * p.spread_bps / 10000
@@ -99,7 +88,7 @@ class MomentumAlpha:
             for levels in (book.bids, book.asks)
         ]
         if min(depths) < p.minimum_depth_quote:
-            return "LIQUIDITY_GATE"
+            blockers.append("LIQUIDITY_GATE")
         if (
             flow.validity is not DataQuality.OK
             or any(
@@ -108,10 +97,12 @@ class MomentumAlpha:
             )
             or flow.agg_volume <= 0
         ):
-            return "FLOW_UNAVAILABLE"
-        if sign * flow.signed_taker_flow / flow.agg_volume < Decimal(str(p.minimum_flow)):
-            return "FLOW_OPPOSED"
-        return None
+            blockers.append("FLOW_UNAVAILABLE")
+        if flow.agg_volume > 0 and sign * flow.signed_taker_flow / flow.agg_volume < Decimal(
+            str(p.minimum_flow)
+        ):
+            blockers.append("FLOW_OPPOSED")
+        return tuple(dict.fromkeys(blockers))
 
     def evaluate(self, d: MomentumInput, *, side: Side, now: datetime) -> AlphaResult:
         utc(now)
@@ -153,9 +144,9 @@ class MomentumAlpha:
         expires = anchor.close_at + timedelta(seconds=p.ttl_seconds)
         if now >= expires:
             return reject("EXPIRED")
-        gate = self._gate(d, side, now)
-        if gate:
-            return reject(gate)
+        gates = self._blockers(d, side, now)
+        if gates:
+            return AlphaResult(candidate=None, reason_codes=gates[:1], failed_gates=gates)
         state = DecisionState.DISCOVERED
         reasons = ["TREND_ALIGNED", "RELATIVE_STRENGTH_ALIGNED"]
         price_quality, participation = 0.3, 0.0
@@ -206,6 +197,9 @@ class MomentumAlpha:
             return reject("TRIGGER_ALREADY_PASSED")
         if sign * (exit_quote - stop) <= 0:
             return reject("STOP_ALREADY_BREACHED")
+        target = trigger + 2 * (trigger - stop)
+        if target <= 0:
+            return reject("INVALID_TARGET_GEOMETRY")
         flow_quality = float(sign * d.flow.signed_taker_flow / d.flow.agg_volume)
         groups = (
             ("price_structure", price_quality),
@@ -229,7 +223,7 @@ class MomentumAlpha:
             expires_at=expires,
             trigger=trigger,
             stop_proposal=stop,
-            take_profit_proposal=trigger + 2 * (trigger - stop),
+            take_profit_proposal=target,
             invalidations=(
                 "CLOSE_BACK_THROUGH_BREAKOUT",
                 "PULLBACK_DEPTH_EXCEEDED",

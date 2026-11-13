@@ -75,9 +75,12 @@ def test_analysis_explains_each_symbol_strategy_and_side_without_raw_inputs(migr
             "stop",
             "target",
             "expires_at",
+            "trace",
         }
         for r in rows
     )
+    assert len({r["trace"]["trace_id"] for r in rows}) == 2
+    assert all(r["trace"]["first_blocker"] == "DATA_UNAVAILABLE" for r in rows)
 
 
 def test_analysis_reports_latest_outcome_per_symbol_and_real_totals(migrated):

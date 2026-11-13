@@ -16,6 +16,7 @@ from pathlib import Path
 from aiohttp import ClientSession, ClientTimeout, web
 
 from tradeforge.bootstrap import snapshot
+from tradeforge.config.policy import RuntimeMode
 from tradeforge.config.settings import load_settings
 from tradeforge.dashboard.api import create_app
 from tradeforge.dashboard.auth import Authenticator
@@ -68,7 +69,7 @@ def build_app(
 ) -> web.Application:
     db = None
     try:
-        load_settings()
+        settings = load_settings()
         if read_only_loopback and auth_file is not None:
             raise ValueError
         auth = Authenticator.from_json(auth_file.read_text(encoding="utf-8")) if auth_file else None
@@ -87,6 +88,7 @@ def build_app(
             market_feed=quote_feed.quotes if quote_feed else None,
             market_state=quote_feed.state if quote_feed else None,
             binance_master=binance_master,
+            testnet_only=settings.mode is RuntimeMode.TESTNET,
         )
         attach_demo_operator(
             app,

@@ -21,6 +21,21 @@ from aiohttp import ClientSession, ClientTimeout, web
 _SYMBOL = re.compile(r"^[A-Z0-9_]{2,40}$")
 
 
+def trusted_loopback(request: web.Request) -> bool:
+    transport = request.transport
+    peer = transport.get_extra_info("peername") if transport else None
+    bound = transport.get_extra_info("sockname") if transport else None
+    return bool(
+        peer
+        and peer[0] == "127.0.0.1"
+        and bound
+        and bound[0] == "127.0.0.1"
+        and request.host == f"127.0.0.1:{bound[1]}"
+        and "Origin" not in request.headers
+        and "Sec-Fetch-Site" not in request.headers
+    )
+
+
 class MarketEventPacket(TypedDict):
     epoch: str
     sequence: int
@@ -156,6 +171,7 @@ def add_market_events_route(
     hub: MarketEventHub,
     *,
     token: str | None,
+    loopback: bool = False,
 ) -> None:
     if token is not None and len(token) < 43:
         raise ValueError("INTERNAL_TOKEN_REQUIRED")
@@ -167,21 +183,10 @@ def add_market_events_route(
                 and hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)
                 and "Origin" not in request.headers
                 and "Sec-Fetch-Site" not in request.headers
+                and (not loopback or trusted_loopback(request))
             )
         else:
-            transport = request.transport
-            peer = transport.get_extra_info("peername") if transport else None
-            bound = transport.get_extra_info("sockname") if transport else None
-            valid = bool(
-                peer
-                and peer[0] == "127.0.0.1"
-                and bound
-                and bound[0] == "127.0.0.1"
-                and request.host == f"127.0.0.1:{bound[1]}"
-                and "Origin" not in request.headers
-                and "Sec-Fetch-Site" not in request.headers
-                and "Authorization" not in request.headers
-            )
+            valid = trusted_loopback(request) and "Authorization" not in request.headers
         if not valid:
             raise web.HTTPForbidden()
         if set(request.query) - {"after", "epoch", "wait"}:

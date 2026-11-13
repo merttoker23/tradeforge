@@ -77,6 +77,7 @@ def test_real_mock_ws_ack_ping_disconnect_and_graceful_resubscribe():
             assert pongs == [b"same-payload", b"same-payload"]
             assert [e.generation for e in events] == [1, 2]
             assert ("STALE", 1) in states
+            assert manager.reason == "WS_DISCONNECTED_1000"
             assert events[0].sequence > 0
             assert all(r["params"] == ["!ticker@arr"] for r in requests)
         finally:

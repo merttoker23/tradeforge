@@ -25,6 +25,7 @@ from tradeforge.market.market_state import MarketState
 from tradeforge.market.runtime import GatewayPersistence, _merge_fresh
 from tradeforge.market.storage import load_bars
 from tradeforge.persistence.db import Database
+from tradeforge.runtime.event_handoff import trusted_loopback
 
 MAX_BODY = 32_000_000
 MAX_REQUEST_SYMBOLS = 512
@@ -53,15 +54,26 @@ def memory_payload(
                 if symbols is None or q.symbol in symbols
             ],
         }
-    markets = {
+    environment = getattr(gateway, "environment", None)
+    rest_markets = {
         m.symbol: m
         for m in persistence.rest_samples
-        if safe and m.symbol in gateway.eligible and m.costs_fresh(at, 15)
+        if safe
+        and m.symbol in gateway.eligible
+        and m.costs_fresh(at, 15)
+        and (environment != "testnet" or m.environment == "testnet")
+    }
+    markets = {
+        symbol: market
+        for symbol, market in rest_markets.items()
+        if symbols is None or symbol in symbols
     }
     book_rows: list[object] = []
     quoted_symbols = set()
     for (name, _), (event, _) in gateway._latest.items():
         if "@bookTicker" not in name or gateway._generations.get(name) != event.generation:
+            continue
+        if symbols is not None and event.symbol not in symbols:
             continue
         if not 0 <= (at - event.event_time).total_seconds() <= 5:
             continue
@@ -76,6 +88,8 @@ def memory_payload(
         )
     if safe and getattr(gateway, "full_depth", False) and gateway.environment == "testnet":
         for symbol, book in gateway.canonical.books.items():
+            if symbols is not None and symbol not in symbols:
+                continue
             if symbol in quoted_symbols:
                 continue
             top = book.top_of_book(at)
@@ -118,12 +132,21 @@ def memory_payload(
             else "BOOK_UNAVAILABLE"
             if book.state_at(at) is not StreamState.READY
             else "FLOW_UNAVAILABLE"
-            if flow is not None and flow.validity_at(at) is not DataQuality.OK
+            if flow is None or flow.validity_at(at) is not DataQuality.OK
             else (gateway.canonical.bar_rejections(symbol, at) or ("CANONICAL_DATA_NOT_READY",))[0]
             if not ready
             else "READY"
         )
-        deep_status.append({"symbol": symbol, "ready": ready, "reason": reason})
+        deep_status.append(
+            {
+                "symbol": symbol,
+                "ready": ready,
+                "reason": reason,
+                "book_state": book.state_at(at).value,
+                "flow_quality": flow.validity_at(at).value if flow is not None else "MISSING",
+                "bar_rejections": gateway.canonical.bar_rejections(symbol, at),
+            }
+        )
     if safe and not summary_only:
         for symbol, book in gateway.canonical.books.items():
             if symbol not in ready_symbols:
@@ -136,9 +159,9 @@ def memory_payload(
                     "symbol": symbol,
                     "book": limited.model_dump(mode="json"),
                     "flow": flow.snapshot(at).model_dump(mode="json"),
-                    "previous_flow": flow.snapshot(at - timedelta(seconds=60)).model_dump(
-                        mode="json"
-                    ),
+                    "previous_flow": flow.snapshot(
+                        at - timedelta(seconds=flow.period_seconds), known_at=at
+                    ).model_dump(mode="json"),
                 }
             )
     status = gateway.status()
@@ -147,14 +170,29 @@ def memory_payload(
     )
     status["analysis_market_covered"] = composite_covered
     status["analysis_volume_covered"] = sum(m.volume_fresh(at, 15) for m in markets.values())
+    minimum_coverage = RegimePolicy().minimum_coverage
+    # The Testnet all-market socket can reset independently of REST and the
+    # per-symbol book/flow sockets. Measure broad REST coverage before applying
+    # the symbol filter so a follow-up decision request sees the same gate.
+    rest_fallback = bool(
+        safe
+        and environment == "testnet"
+        and status.get("reason") == "STREAMS_STALE"
+        and gateway.eligible
+        and sum(m.source == "binance:rest" for m in rest_markets.values()) / len(gateway.eligible)
+        >= minimum_coverage
+    )
+    if rest_fallback:
+        status.update(data_ready=True, market_data_source="REST_FALLBACK")
     status["analysis_coverage_ready"] = bool(
         safe
         and status.get("data_ready") is True
         and gateway.eligible
-        and composite_covered / len(gateway.eligible) >= RegimePolicy().minimum_coverage
+        and (rest_fallback or composite_covered / len(gateway.eligible) >= minimum_coverage)
     )
     return {
         "as_of": at.isoformat(),
+        "environment": environment,
         "status": status,
         "clock_safe": safe,
         "eligible": sorted(gateway.eligible),
@@ -205,6 +243,8 @@ def add_memory_route(
         raise ValueError("INTERNAL_TOKEN_REQUIRED")
 
     def verified(request: web.Request) -> bool:
+        if loopback and not trusted_loopback(request):
+            return False
         if (
             len(request.headers.getall("Authorization", [])) == 1
             and hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)
@@ -218,19 +258,7 @@ def add_memory_route(
         # accepted only from the loopback listener itself, exactly like the
         # tokenless route, so a remote or browser-originated request still
         # cannot read market memory without the bearer token.
-        transport = request.transport
-        peer = transport.get_extra_info("peername") if transport else None
-        bound = transport.get_extra_info("sockname") if transport else None
-        return bool(
-            peer
-            and peer[0] == "127.0.0.1"
-            and bound
-            and bound[0] == "127.0.0.1"
-            and request.host == f"127.0.0.1:{bound[1]}"
-            and "Origin" not in request.headers
-            and "Sec-Fetch-Site" not in request.headers
-            and "Authorization" not in request.headers
-        )
+        return "Authorization" not in request.headers
 
     async def memory(request: web.Request) -> web.Response:
         if not verified(request):
@@ -274,19 +302,7 @@ def add_loopback_memory_route(
     """
 
     async def memory(request: web.Request) -> web.Response:
-        transport = request.transport
-        peer = transport.get_extra_info("peername") if transport else None
-        bound = transport.get_extra_info("sockname") if transport else None
-        if (
-            not peer
-            or peer[0] != "127.0.0.1"
-            or not bound
-            or bound[0] != "127.0.0.1"
-            or request.host != f"127.0.0.1:{bound[1]}"
-            or "Origin" in request.headers
-            or "Sec-Fetch-Site" in request.headers
-            or "Authorization" in request.headers
-        ):
+        if not trusted_loopback(request) or "Authorization" in request.headers:
             raise web.HTTPForbidden()
         selected = requested_symbols(request)
         if request.query.get("detail") == "summary":
@@ -344,6 +360,11 @@ async def fetch_memory(
         ):
             raise ValueError("MARKET_HANDOFF_INVALID")
         return feed
+
+
+def require_market_environment(feed: dict[str, Any], expected: str | None) -> None:
+    if expected is not None and feed.get("environment") != expected:
+        raise ValueError("TESTNET_ENVIRONMENT_MISMATCH")
 
 
 def alpha_inputs(
@@ -408,7 +429,9 @@ def alpha_inputs(
     for row in feed["markets"]:
         try:
             market = MarketSnapshot.model_validate_json(json.dumps(row))
-            if market.as_of <= at:
+            if market.as_of <= at and (
+                feed.get("environment") != "testnet" or market.environment == "testnet"
+            ):
                 markets[market.symbol] = market
         except (KeyError, TypeError, ValueError):
             continue
@@ -471,14 +494,12 @@ def alpha_inputs(
             reason = "ALPHA_INPUT_INVALID"
             sample = MomentumInput.model_validate(common)
             try:
-                sample = ReversalInput.model_validate(
-                    {
-                        **common,
-                        "previous_flow": TradeFlowWindow.model_validate_json(
-                            json.dumps(row["previous_flow"])
-                        ),
-                    }
+                previous_flow = TradeFlowWindow.model_validate_json(
+                    json.dumps(row["previous_flow"])
                 )
+                if previous_flow.validity is not DataQuality.OK:
+                    raise ValueError("PREVIOUS_FLOW_UNAVAILABLE")
+                sample = ReversalInput.model_validate({**common, "previous_flow": previous_flow})
             except (KeyError, TypeError, ValueError):
                 reject(symbol, "PREVIOUS_FLOW_UNAVAILABLE")
             result.append(sample)

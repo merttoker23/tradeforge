@@ -114,6 +114,7 @@ QUERIES = {
           payload->>'last_source_at' AS last_source_at,
           payload->'healthy' AS healthy,payload->'analysis_ready' AS analysis_ready,
           payload->'execution_ready' AS execution_ready,payload->>'stage' AS stage,
+          payload->>'execution_startup_reason' AS execution_startup_reason,
           payload->>'last_progress_at' AS last_progress_at,
           payload->>'last_success_at' AS last_success_at,payload->>'last_error' AS last_error,
           payload->>'last_analysis_at' AS last_analysis_at,
@@ -147,6 +148,10 @@ QUERIES = {
           payload->'regime_reasons' AS regime_reasons,
           payload->'entries_enabled' AS entries_enabled,payload->'trial_enabled' AS trial_enabled,
           payload->'stream_ready' AS stream_ready,payload->'protection_ready' AS protection_ready,
+          payload->'storage_ready' AS storage_ready,payload->'risk_allowed' AS risk_allowed,
+          payload->'account_reconciled' AS account_reconciled,
+          payload->'market_ready' AS market_ready,
+          payload->>'market_data_source' AS market_data_source,
           payload->'blockers' AS blockers,
           payload->'autonomous_decisions' AS autonomous_decisions
           ,payload->'private_stream' AS private_stream,payload->'protection' AS protection
@@ -475,7 +480,16 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     for row in summaries:
         if not isinstance(row, dict) or not isinstance(row.get("symbol"), str):
             continue
-        deep_by_symbol[str(row["symbol"])] = row
+        age = _age_seconds(at, row.get("analyzed_at"))
+        expires = _age_seconds(at, row.get("expires_at"))
+        deep_by_symbol[str(row["symbol"])] = {
+            **row,
+            "age_seconds": age,
+            "stale": not quant_fresh
+            or age is None
+            or not 0 <= age <= 5
+            or (expires is not None and expires >= 0),
+        }
     deep_total = len(deep_by_symbol)
     analyzed = deep_total
     if not analyzed and quant and type(quant.get("analyzed_symbols")) is int:
@@ -523,6 +537,9 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
                 reasons=list(deep.get("reasons") or []),
                 analyzed_at=deep.get("analyzed_at") or merged["analyzed_at"],
                 as_of=deep.get("as_of") or merged["as_of"],
+                age_seconds=deep["age_seconds"],
+                stale=deep["stale"],
+                expires_at=deep.get("expires_at"),
             )
         pair_rows.append(merged)
     for symbol, deep in deep_by_symbol.items():
@@ -538,6 +555,9 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
                 "reasons": list(deep.get("reasons") or []),
                 "analyzed_at": deep.get("analyzed_at"),
                 "as_of": deep.get("as_of"),
+                "age_seconds": deep["age_seconds"],
+                "stale": deep["stale"],
+                "expires_at": deep.get("expires_at"),
                 "sample_count": None,
                 "volatility": None,
                 "relative_return": None,
@@ -670,7 +690,16 @@ def _live_analysis(result: dict[str, Any], at: datetime) -> dict[str, Any]:
     rest_state = stream.get("rest_state")
     if rest_state not in {"CONNECTED", "RATE_LIMITED", "STALE", "NOT_SAMPLED"}:
         rest_state = "UNKNOWN"
-    connection_fresh = stream_status in {"OK", "DEGRADED"}
+    # Coverage measures market evidence. The connection states come from the
+    # gateway heartbeat and can still be known when no pair has fresh coverage.
+    sample_age = _age_seconds(at, stream.get("as_of"))
+    connection_fresh = sample_age is not None and 0 <= sample_age < 15 and stream_status != "STALE"
+    if ws_state == "CONNECTED" and stream_status not in {"OK", "DEGRADED"}:
+        ws_state = "NO_DATA"
+    if rest_state == "CONNECTED":
+        rest_age = _age_seconds(at, stream.get("quote_last_success_at"))
+        if rest_age is None or not 0 <= rest_age <= 15:
+            rest_state = "STALE"
     if not connection_fresh:
         # A stale observation may describe a link that has since dropped.
         ws_state = "UNKNOWN"
@@ -842,15 +871,18 @@ def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
         result["service_health"].setdefault(name, "UNKNOWN")
     workers = sections.get("workers", {}).get("data") or []
     execution = next((w for w in workers if w.get("service") == "execution_core"), None)
-    execution_fresh = bool(execution and execution.get("freshness") == "OK")
+    quant = next((w for w in workers if w.get("service") == "quant_core"), None)
+    startup = (
+        quant.get("execution_startup_reason") if quant and quant.get("freshness") == "OK" else None
+    )
+    startup_blocker = startup if startup and startup != "STARTING" else None
+    execution_fresh = bool(execution and execution.get("freshness") == "OK" and not startup_blocker)
     result["execution_readiness"] = {
         "ready": bool(execution_fresh and execution and execution.get("execution_ready") is True),
         "reason": (
             execution.get("reason", "DISPATCH_NOT_OBSERVED")
             if execution_fresh and execution
-            else "DISPATCH_STALE"
-            if execution
-            else "DISPATCH_NOT_OBSERVED"
+            else startup_blocker or ("DISPATCH_STALE" if execution else "DISPATCH_NOT_OBSERVED")
         ),
         "stage": execution.get("stage") if execution else None,
         "last_progress_at": execution.get("last_progress_at") if execution else None,
@@ -859,13 +891,22 @@ def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
         "trial_enabled": bool(execution_fresh and execution and execution.get("trial_enabled")),
         "blockers": execution.get("blockers", [])
         if execution_fresh and execution
-        else ["DISPATCH_STALE"],
+        else [startup_blocker or ("DISPATCH_STALE" if execution else "DISPATCH_NOT_OBSERVED")],
         "stream_ready": bool(execution_fresh and execution and execution.get("stream_ready")),
         "protection_ready": bool(
             execution_fresh and execution and execution.get("protection_ready")
         ),
+        "market_data_source": "REST_FALLBACK"
+        if execution_fresh
+        and execution
+        and execution.get("market_ready") is True
+        and execution.get("market_data_source") == "REST_FALLBACK"
+        else None,
+        **{
+            key: bool(execution_fresh and execution and execution.get(key) is True)
+            for key in ("storage_ready", "market_ready", "risk_allowed", "account_reconciled")
+        },
     }
-    quant = next((w for w in workers if w.get("service") == "quant_core"), None)
     result["analysis_readiness"] = {
         "ready": bool(
             quant and quant.get("freshness") == "OK" and quant.get("analysis_ready") is True
@@ -887,9 +928,7 @@ def refresh_freshness(snapshot: dict[str, Any], at: datetime) -> dict[str, Any]:
         "status": regime_section.get("status", "UNKNOWN"),
         "label": regime_label,
         "tradeable": bool(
-            worker_tradeable
-            if isinstance(worker_tradeable, bool)
-            else regime_label not in {None, "UNKNOWN", "TRANSITION"}
+            regime_label in {"RANGE", "TREND_EXPANSION"} and worker_tradeable is not False
         ),
         "timeframe": regime_row.get("timeframe")
         or (quant.get("analysis_timeframe") if quant else None),
@@ -1040,6 +1079,9 @@ def _safe_fields(row: dict[str, Any]) -> None:
                         else None,
                         "as_of": entry.get("as_of")
                         if isinstance(entry.get("as_of"), str)
+                        else None,
+                        "expires_at": entry.get("expires_at")
+                        if isinstance(entry.get("expires_at"), str)
                         else None,
                         "decision": decision,
                         "strategy": strategy,

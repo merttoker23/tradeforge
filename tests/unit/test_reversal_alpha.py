@@ -348,7 +348,7 @@ def test_family_conflict_and_dependent_features_are_never_independent_votes():
         ("quote_crossing", "TRIGGER_ALREADY_PASSED"),
         ("stop_crossing", "STOP_ALREADY_BREACHED"),
         ("prior_missing", "FLOW_UNAVAILABLE"),
-        ("prior_gap", "MICROSTRUCTURE_DESYNC"),
+        ("prior_gap", "FLOW_WINDOW_GAP"),
         ("maximum_stretch", "STRETCH_GATE"),
     ],
 )
@@ -403,8 +403,8 @@ def test_rejection_geometry_and_post_sweep_invalidations(side, kind, reason):
             d,
             previous_flow=change(
                 d.previous_flow,
-                source_start=d.previous_flow.source_start - timedelta(seconds=10),
-                source_end=d.previous_flow.source_end - timedelta(seconds=10),
+                source_start=d.previous_flow.source_start - timedelta(seconds=20),
+                source_end=d.previous_flow.source_end - timedelta(seconds=20),
             ),
         )
     if kind == "maximum_stretch":
@@ -537,3 +537,47 @@ def test_positive_ohlc_with_nonpositive_short_target_is_rejected_safely():
     )
     result = ReversalAlpha().evaluate(d, side=Side.SHORT, now=d.as_of)
     assert result.candidate is None and result.reason_codes == ("INVALID_TARGET_GEOMETRY",)
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+def test_valid_range_reversal_not_rejected_for_asynchronous_trade_timestamps(side):
+    """A trade stream does not tick at the same instant as a depth stream."""
+    from tradeforge.alpha.reversal import ReversalAlpha
+
+    d = sample(side)
+    earlier = d.as_of - timedelta(seconds=3)
+    # Quote/depth are synchronized; last aggregate trade is three seconds old
+    # but remains inside the strict five-second flow freshness limit.
+    current = change(d.flow, source_at=earlier, source_end=earlier)
+    d = change(d, flow=current)
+    result = ReversalAlpha().evaluate(d, side=side, now=d.as_of)
+    assert result.candidate is not None
+    assert result.candidate.state is DecisionState.ARMED
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+def test_adjacent_valid_flow_windows_can_have_five_second_trade_silence(side):
+    from tradeforge.alpha.reversal import ReversalAlpha
+
+    d = sample(side)
+    earlier = d.as_of - timedelta(seconds=65)
+    prior = change(d.previous_flow, source_at=earlier, source_end=earlier)
+    d = change(d, previous_flow=prior)
+    result = ReversalAlpha().evaluate(d, side=side, now=d.as_of)
+    assert result.candidate is not None
+    assert result.candidate.state is DecisionState.ARMED
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+def test_prolonged_gap_between_flow_windows_remains_hard_veto(side):
+    from tradeforge.alpha.reversal import ReversalAlpha
+
+    d = sample(side)
+    earlier = d.as_of - timedelta(seconds=80)
+    d = change(
+        d,
+        previous_flow=change(d.previous_flow, source_at=earlier, source_end=earlier),
+    )
+    result = ReversalAlpha().evaluate(d, side=side, now=d.as_of)
+    assert result.candidate is None
+    assert result.reason_codes == ("FLOW_WINDOW_GAP",)

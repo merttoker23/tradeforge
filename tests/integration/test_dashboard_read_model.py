@@ -42,6 +42,8 @@ def test_actual_automation_is_separate_from_dashboard_authority_and_expires(migr
             "blockers": [],
             "stream_ready": True,
             "protection_ready": True,
+            "market_ready": True,
+            "market_data_source": "REST_FALLBACK",
         },
     )
     save_runtime(
@@ -67,12 +69,14 @@ def test_actual_automation_is_separate_from_dashboard_authority_and_expires(migr
     assert result["execution_readiness"]["ready"] is True
     assert result["execution_readiness"]["entries_enabled"] is True
     assert result["execution_readiness"]["trial_enabled"] is True
+    assert result["execution_readiness"]["market_data_source"] == "REST_FALLBACK"
     quant = next(r for r in result["sections"]["workers"]["data"] if r["service"] == "quant_core")
     assert quant["evaluated_count"] == 8 and quant["analysis_symbols"] == 2
     assert quant["input_rejections"] is None
     expired = refresh_freshness(result, at + timedelta(seconds=16))
     assert expired["execution_readiness"]["ready"] is False
     assert expired["execution_readiness"]["reason"] == "DISPATCH_STALE"
+    assert expired["execution_readiness"]["market_data_source"] is None
     assert expired["trading_authority"]["orders_enabled"] is False
 
 
@@ -487,6 +491,47 @@ def test_live_analysis_never_turns_feed_coverage_into_analyzed_pairs(migrated):
     assert live["connections"]["worker_errors"] == {"CANONICAL": 1}
     assert live["errors"][0]["source"] == "market_gateway"
     assert live["errors"][0]["code"] == "MARKET_REST_UNAVAILABLE"
+
+
+def test_gateway_connection_telemetry_survives_empty_stream_coverage(migrated):
+    from tradeforge.dashboard.read_model import ReadModel, refresh_freshness
+    from tradeforge.runtime.storage import save_runtime
+
+    at = datetime.now(UTC)
+    rest_at = (at - timedelta(seconds=5)).isoformat()
+    save_runtime(
+        migrated,
+        "market_gateway",
+        at,
+        at + timedelta(seconds=15),
+        {
+            "eligible": 10,
+            "covered": 0,
+            "measured": False,
+            "clock_safe": True,
+            "coverage_deadlines": [],
+            "websocket_state": "NO_DATA",
+            "rest_state": "CONNECTED",
+            "quote_last_reason": "OK",
+            "quote_last_success_at": rest_at,
+            "socket_reconnects": 2,
+        },
+    )
+
+    result = ReadModel(migrated, clock=lambda: at).snapshot()
+    connections = result["live_analysis"]["connections"]
+    assert result["data_readiness"]["streams"] == "UNKNOWN"
+    assert connections["binance_websocket"] == "NO_DATA"
+    assert connections["binance_rest"] == "CONNECTED"
+    assert connections["rest_last_success_at"] == rest_at
+    assert connections["ws_reconnects"] == 2
+
+    aged = refresh_freshness(result, at + timedelta(seconds=11))["live_analysis"]["connections"]
+    assert aged["binance_rest"] == "STALE"
+    assert aged["rest_last_success_at"] == rest_at
+
+    expired = refresh_freshness(result, at + timedelta(seconds=16))["live_analysis"]["connections"]
+    assert expired["binance_websocket"] == expired["binance_rest"] == "UNKNOWN"
 
 
 @pytest.mark.parametrize(

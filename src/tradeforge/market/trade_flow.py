@@ -110,19 +110,21 @@ class TradeFlow:
             raise ValueError("INVALID_FLOW_EVENT") from None
 
     def _window(
-        self, start: datetime, as_of: datetime
+        self, start: datetime, end: datetime, known_at: datetime
     ) -> Iterator[tuple[int, datetime, datetime, Decimal, bool]]:
         for trade in reversed(self._trades):
             if trade[1] <= start:
                 break
-            if trade[1] <= as_of and trade[2] <= as_of:
+            if trade[1] <= end and trade[2] <= known_at:
                 yield trade
 
-    def _validity(self, start: datetime, as_of: datetime, has_trades: bool) -> DataQuality:
+    def _validity(
+        self, start: datetime, end: datetime, known_at: datetime, has_trades: bool
+    ) -> DataQuality:
         if self._invalid:
             return DataQuality.UNKNOWN
         if (self._floor is not None and self._floor > start) or any(
-            start < a <= as_of and b <= as_of for a, b in self._gaps
+            start < a <= end and b <= known_at for a, b in self._gaps
         ):
             return DataQuality.GAP
         if self._started is None or self._started > start:
@@ -132,21 +134,26 @@ class TradeFlow:
     def validity_at(self, as_of: datetime) -> DataQuality:
         utc(as_of)
         start = as_of - timedelta(seconds=self.period_seconds)
-        return self._validity(start, as_of, next(self._window(start, as_of), None) is not None)
+        return self._validity(
+            start, as_of, as_of, next(self._window(start, as_of, as_of), None) is not None
+        )
 
-    def snapshot(self, as_of: datetime) -> TradeFlowWindow:
-        utc(as_of)
-        start = as_of - timedelta(seconds=self.period_seconds)
-        items = list(self._window(start, as_of))
+    def snapshot(self, end: datetime, *, known_at: datetime | None = None) -> TradeFlowWindow:
+        utc(end)
+        as_of = utc(known_at) if known_at is not None else end
+        if as_of < end:
+            raise ValueError("FLOW_WINDOW_NOT_CLOSED")
+        start = end - timedelta(seconds=self.period_seconds)
+        items = list(self._window(start, end, as_of))
         items.reverse()
-        quality = self._validity(start, as_of, bool(items))
-        source = max((t[1] for t in items), default=as_of)
-        observed = max((t[2] for t in items), default=as_of)
+        quality = self._validity(start, end, as_of, bool(items))
+        source = max((t[1] for t in items), default=end)
+        observed = max(source, max((t[2] for t in items), default=as_of))
         return TradeFlowWindow.model_validate(
             dict(
                 **self.key.model_dump(),
                 schema_version=1,
-                event_id=uuid5(NAMESPACE_URL, f"{self.key.key}/{as_of}/{items}/{quality}"),
+                event_id=uuid5(NAMESPACE_URL, f"{self.key.key}/{end}/{as_of}/{items}/{quality}"),
                 source_at=source,
                 observed_at=observed,
                 as_of=as_of,

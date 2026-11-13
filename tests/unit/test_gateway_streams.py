@@ -275,3 +275,21 @@ def test_watch_deep_wire_streams_preserve_exchange_identity(suffix, row, exchang
     assert event.exchange_sequence == exchange_id
     # Partial bars are transported as observations, never materialized as ClosedBar.
     assert event.symbol == "BTCUSDT"
+
+
+def test_gateway_can_skip_open_candles_before_parsing_prices():
+    from tradeforge.market.streams import decode_frame
+
+    kwargs = {
+        "route": "market",
+        "received_at": NOW,
+        "generation": 1,
+        "sequence": 1,
+        "eligible": frozenset({"BTCUSDT"}),
+        "closed_only": True,
+    }
+    candle = {"s": "BTCUSDT", "i": "5m", "x": False}
+    row = {"s": "BTCUSDT", "E": MS, "e": "kline", "k": candle}
+    assert decode_frame({"stream": "btcusdt@kline_5m", "data": row}, **kwargs) == ()
+    candle.update(x=True, o="100", h="101", l="99", c="100", v="1")
+    assert len(decode_frame({"stream": "btcusdt@kline_5m", "data": row}, **kwargs)) == 1

@@ -22,9 +22,15 @@ class BarWindow:
         self._bars: dict[datetime, ClosedBar] = {}
         self._key: tuple[str, ...] | None = None
         self._floor: datetime | None = None
+        self._ordered: tuple[datetime, ...] | None = None
 
     def __len__(self) -> int:
         return len(self._bars)
+
+    def _openings(self) -> tuple[datetime, ...]:
+        if self._ordered is None:
+            self._ordered = tuple(sorted(self._bars))
+        return self._ordered
 
     @property
     def truncated(self) -> bool:
@@ -34,7 +40,7 @@ class BarWindow:
         utc(as_of)
         return tuple(
             self._bars[opened]
-            for opened in sorted(self._bars)
+            for opened in self._openings()
             if self._bars[opened].observed_at <= as_of and self._bars[opened].as_of <= as_of
         )
 
@@ -57,9 +63,11 @@ class BarWindow:
             if bar.open_at <= oldest:
                 raise ValueError("HISTORY_NOT_RETAINED")
             removed = self._bars.pop(oldest)
+            self._ordered = None
             self._floor = max(self._floor or removed.observed_at, removed.observed_at)
         self._key = bar.key
         self._bars[bar.open_at] = bar
+        self._ordered = None
         return True
 
     def at(self, as_of: datetime) -> tuple[ClosedBar, ...]:
@@ -68,6 +76,6 @@ class BarWindow:
             raise ValueError("HISTORY_NOT_RETAINED")
         return tuple(
             self._bars[opened]
-            for opened in sorted(self._bars)
+            for opened in self._openings()
             if self._bars[opened].observed_at <= as_of and self._bars[opened].as_of <= as_of
         )

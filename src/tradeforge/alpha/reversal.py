@@ -7,7 +7,13 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
-from tradeforge.alpha.base import AlphaCandidate, AlphaResult, MomentumInput, instrument_stress
+from tradeforge.alpha.base import (
+    AlphaCandidate,
+    AlphaResult,
+    MomentumInput,
+    evidence_blockers,
+    instrument_stress,
+)
 from tradeforge.alpha.momentum import _trend
 from tradeforge.domain.common import DataQuality, Positive, StrictModel, UnitFloat, utc
 from tradeforge.domain.decision import AlphaFamily, DecisionState, Side
@@ -21,6 +27,10 @@ class ReversalPolicy(StrictModel):
     ttl_seconds: Annotated[int, Field(ge=1, le=3600)] = 900
     micro_age_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     synchronization_seconds: Annotated[int, Field(ge=0, le=5)] = 1
+    # Executed trades are event-driven, unlike the continuously refreshed
+    # book/quote. A valid pair of adjacent 60-second windows can have several
+    # seconds between its last and first trade without any missing messages.
+    maximum_flow_window_gap_seconds: Annotated[int, Field(ge=1, le=60)] = 15
     spread_bps: Positive = Decimal("5")
     minimum_depth_quote: Positive = Decimal("10000")
     minimum_stretch: Positive = Decimal("0.5")
@@ -65,27 +75,11 @@ class ReversalAlpha:
         self._latest: dict[tuple[str, ...], tuple[datetime, str]] = {}
         self._emitted: dict[str, tuple[datetime, int]] = {}
 
-    def _gate(self, d: ReversalInput, side: Side, now: datetime) -> str | None:
+    def _blockers(self, d: ReversalInput, side: Side, now: datetime) -> tuple[str, ...]:
         p, f = self.policy, d.features
-        if d.quality is not DataQuality.OK:
-            return "DATA_UNAVAILABLE"
-        for bars in (d.setup_bars, d.medium_bars, d.higher_bars):
-            if len(bars) < p.minimum_history:
-                return "INSUFFICIENT_HISTORY"
-            if (now - bars[-1].close_at).total_seconds() >= bars[-1].timeframe.seconds:
-                return "STALE_BARS"
-        if (now - f.state.source_at).total_seconds() > (
-            f.policy.max_age_periods * f.frame.timeframe.seconds
-        ):
-            return "STALE_REGIME"
-        universe = f.frame.universe
-        if (
-            d.instrument not in universe.eligible
-            or (now - universe.observed_at).total_seconds() > f.policy.universe_ttl_seconds
-        ):
-            return "UNIVERSE_UNAVAILABLE"
+        blockers = evidence_blockers(d, now, p.minimum_history)
         if f.state.label is not RegimeLabel.RANGE:
-            return "REGIME_NOT_ALLOWED"
+            blockers.append("REGIME_NOT_ALLOWED")
         rows = [r for r in f.frame.observations if r.instrument == d.instrument]
         features = [r for r in f.features if r.instrument == d.instrument]
         if (
@@ -94,45 +88,55 @@ class ReversalAlpha:
             or len(features) != 1
             or features[0].sample_count < f.policy.minimum_history
         ):
-            return "FEATURE_UNAVAILABLE"
+            blockers.append("FEATURE_UNAVAILABLE")
         sign = 1 if side is Side.LONG else -1
-        feature = features[0]
-        stress = instrument_stress(d)
-        if stress:
-            return stress
-        if any(
-            _trend(bars, -sign, p.trend_efficiency) for bars in (d.medium_bars, d.higher_bars)
-        ) or (feature.direction == -sign and feature.efficiency >= p.trend_efficiency):
-            return "STRONG_TREND_FADE"
+        if len(features) == 1:
+            feature = features[0]
+            stress = instrument_stress(d)
+            if stress:
+                blockers.append(stress)
+            if any(
+                _trend(bars, -sign, p.trend_efficiency) for bars in (d.medium_bars, d.higher_bars)
+            ) or (feature.direction == -sign and feature.efficiency >= p.trend_efficiency):
+                blockers.append("STRONG_TREND_FADE")
         m, b, flow, old = d.market, d.book, d.flow, d.previous_flow
         if not m.costs_fresh(now, p.micro_age_seconds) or not m.volume_fresh(
             now, p.micro_age_seconds
         ):
-            return "MARKET_UNAVAILABLE"
+            blockers.append("MARKET_UNAVAILABLE")
         if b.stream_state is not StreamState.READY or any(
             (now - at).total_seconds() > p.micro_age_seconds for at in (b.source_at, b.captured_at)
         ):
-            return "BOOK_UNAVAILABLE"
+            blockers.append("BOOK_UNAVAILABLE")
         spread = 20000 * (m.best_ask - m.best_bid) / (m.best_ask + m.best_bid)
-        book_spread = 20000 * (b.asks[0][0] - b.bids[0][0]) / (b.asks[0][0] + b.bids[0][0])
+        book_spread = Decimal(0)
+        if b.asks and b.bids:
+            book_spread = 20000 * (b.asks[0][0] - b.bids[0][0]) / (b.asks[0][0] + b.bids[0][0])
         if max(spread, book_spread) > p.spread_bps:
-            return "SPREAD_GATE"
+            blockers.append("SPREAD_GATE")
         if (
             any(w.validity is not DataQuality.OK or w.agg_volume <= 0 for w in (flow, old))
             or (now - flow.source_end).total_seconds() > p.micro_age_seconds
             or (now - flow.source_at).total_seconds() > p.micro_age_seconds
         ):
-            return "FLOW_UNAVAILABLE"
-        times = (m.source_at, b.source_at, b.captured_at, flow.source_end)
+            blockers.append("FLOW_UNAVAILABLE")
+        # Quote and depth must agree tightly. Trade timestamps are not
+        # periodic; freshness and stream validity above protect their source,
+        # so treating them as book ticks wrongly rejects real range reversals.
+        quote_book_times = (m.book_source_at or m.source_at, b.source_at, b.captured_at)
         if (
-            (max(times) - min(times)).total_seconds() > p.synchronization_seconds
-            or abs(m.best_bid - b.bids[0][0]) > (m.best_bid * p.spread_bps / 10000)
-            or abs(m.best_ask - b.asks[0][0]) > (m.best_ask * p.spread_bps / 10000)
-            or (flow.source_start - old.source_end).total_seconds() > p.synchronization_seconds
+            (max(quote_book_times) - min(quote_book_times)).total_seconds()
+            > p.synchronization_seconds
+            or (b.bids and abs(m.best_bid - b.bids[0][0]) > (m.best_bid * p.spread_bps / 10000))
+            or (b.asks and abs(m.best_ask - b.asks[0][0]) > (m.best_ask * p.spread_bps / 10000))
             or flow.source_start >= flow.source_end
             or old.period_seconds != flow.period_seconds
         ):
-            return "MICROSTRUCTURE_DESYNC"
+            blockers.append("MICROSTRUCTURE_DESYNC")
+        # Both windows are independently validated above. Do not demand that
+        # trades print at their exact boundary, but reject a prolonged idle gap.
+        if (flow.source_start - old.source_end).total_seconds() > p.maximum_flow_window_gap_seconds:
+            blockers.append("FLOW_WINDOW_GAP")
         mid = (m.best_bid + m.best_ask) / 2
         band = mid * p.spread_bps / 10000
         if (
@@ -142,12 +146,13 @@ class ReversalAlpha:
             )
             < p.minimum_depth_quote
         ):
-            return "LIQUIDITY_GATE"
-        current_ratio = sign * flow.signed_taker_flow / flow.agg_volume
-        previous_ratio = sign * old.signed_taker_flow / old.agg_volume
-        if previous_ratio >= 0 or current_ratio < Decimal(str(p.minimum_flow)):
-            return "FLOW_NOT_STABILIZED"
-        return None
+            blockers.append("LIQUIDITY_GATE")
+        if min(flow.agg_volume, old.agg_volume) > 0:
+            current_ratio = sign * flow.signed_taker_flow / flow.agg_volume
+            previous_ratio = sign * old.signed_taker_flow / old.agg_volume
+            if previous_ratio >= 0 or current_ratio < Decimal(str(p.minimum_flow)):
+                blockers.append("FLOW_NOT_STABILIZED")
+        return tuple(dict.fromkeys(blockers))
 
     def evaluate(self, d: ReversalInput, *, side: Side, now: datetime) -> AlphaResult:
         utc(now)
@@ -195,9 +200,9 @@ class ReversalAlpha:
         expires = anchor.close_at + timedelta(seconds=p.ttl_seconds)
         if now >= expires:
             return reject("EXPIRED")
-        gate = self._gate(d, side, now)
-        if gate:
-            return reject(gate)
+        gates = self._blockers(d, side, now)
+        if gates:
+            return AlphaResult(candidate=None, reason_codes=gates[:1], failed_gates=gates)
         if found is None:
             return reject("NO_SWEEP_RECLAIM")
         i, boundary, baseline, failed = found

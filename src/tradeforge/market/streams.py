@@ -123,6 +123,7 @@ def decode_frame(
     eligible: frozenset[str],
     max_age: float = 15,
     max_future: float = 0,
+    closed_only: bool = False,
 ) -> tuple[MarketEvent, ...]:
     utc(received_at)
     _counter(generation)
@@ -156,6 +157,10 @@ def decode_frame(
             continue
         if spec.symbol is not None and spec.symbol != symbol:
             raise ValueError("STREAM_SYMBOL_MISMATCH")
+        if closed_only and "@kline_" in spec.name:
+            candle = row.get("k")
+            if isinstance(candle, dict) and candle.get("x") is False:
+                continue
         source = milliseconds(row.get("E"))
         age = (received_at - source).total_seconds()
         if not -max_future <= age <= max_age:

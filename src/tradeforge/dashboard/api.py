@@ -81,6 +81,7 @@ def create_app(
     market_feed: Callable[[], tuple[MarketQuote | MarketSnapshot, ...]] | None = None,
     market_state: Callable[[], dict[str, Any]] | None = None,
     binance_master: str | None = None,
+    testnet_only: bool = False,
 ) -> web.Application:
     external = urlsplit(external_origin) if external_origin else None
     if external is not None and (
@@ -422,7 +423,7 @@ def create_app(
             {
                 "service": "dashboard",
                 "phase": "PHASE_16",
-                "mode": "paper",
+                "mode": "testnet" if testnet_only else "paper",
                 "alive": True,
                 "live": False,
                 "orders_enabled": False,
@@ -536,6 +537,8 @@ def create_app(
             return binance_failure(ValueError("BINANCE_SETTINGS_INVALID"))
         if not isinstance(body, dict):
             return binance_failure(ValueError("BINANCE_SETTINGS_INVALID"))
+        if testnet_only and body.get("environment") != "testnet":
+            return binance_failure(ValueError("TESTNET_ENVIRONMENT_REQUIRED"))
         from tradeforge.runtime.binance_environment import (
             public_state,
             switch_environment,

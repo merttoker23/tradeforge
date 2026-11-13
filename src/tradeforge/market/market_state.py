@@ -101,7 +101,14 @@ class MarketState:
         bar = closed_kline(event, key)
         return False if bar is None else self.ingest_bar(bar)
 
-    def view(self, key: InstrumentKey, timeframe: Timeframe, as_of: datetime) -> BarView:
+    def view(
+        self,
+        key: InstrumentKey,
+        timeframe: Timeframe,
+        as_of: datetime,
+        *,
+        with_evidence: bool = True,
+    ) -> BarView:
         utc(as_of)
         derived = timeframe in (Timeframe.H1, Timeframe.H4, Timeframe.H12)
         native = Timeframe.M15 if derived else timeframe
@@ -140,5 +147,10 @@ class MarketState:
         if flags and flags[-1] is not DataQuality.OK:
             quality = flags[-1]
         return BarView(
-            key, timeframe, as_of, bars, quality, series.evidence(as_of) if series else ()
+            key,
+            timeframe,
+            as_of,
+            bars,
+            quality,
+            series.evidence(as_of) if series and with_evidence else (),
         )

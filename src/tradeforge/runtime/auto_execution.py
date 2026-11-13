@@ -91,7 +91,7 @@ async def serve(
     expected_revision: int | None = None,
     gateway_base: str | None = None,
 ) -> None:
-    if client.environment != "testnet" or not enable_entries or not trial_enabled:
+    if client.environment != "testnet" or not enable_entries:
         raise ValueError("EXPLICIT_TESTNET_AUTO_EXECUTION_REQUIRED")
     stream: PrivateStream
     autonomous = bool(internal_token)
@@ -147,7 +147,7 @@ async def serve(
         from tradeforge.execution.account_sync import cleanup_flat_testnet
         from tradeforge.runtime.demo_decisions import DemoDecisions
         from tradeforge.runtime.maintenance import observe_storage, retain
-        from tradeforge.runtime.market_link import fetch_memory
+        from tradeforge.runtime.market_link import fetch_memory, require_market_environment
         from tradeforge.runtime.settlement import settle_closed_results
         from tradeforge.runtime.trading import initial_demo_activation
 
@@ -177,7 +177,7 @@ async def serve(
                             reason="LOCAL_EXECUTION_DISABLED",
                         )
                     else:
-                        market["ready"] = False
+                        market.update(ready=False, source=None)
                         ready = recovery.ready and stream.ready
                         if ready:
                             progress.advance("SETTLEMENT")
@@ -199,6 +199,9 @@ async def serve(
                         enable_entries, trial_enabled = await asyncio.to_thread(
                             commands.testnet_authority, default_authority
                         )
+                        # A saved start command authorizes entries. The operator
+                        # must also opt in to the separately capped trial policy.
+                        trial_enabled = trial_enabled and default_authority[1]
                         decisions.trial_policy = TestnetTrialPolicy(enabled=trial_enabled)
                         if ready and first_start and enable_entries:
                             await asyncio.to_thread(
@@ -223,8 +226,11 @@ async def serve(
                             base=gateway_base,
                             summary_only=True,
                         )
+                        require_market_environment(data, "testnet")
                         market.update(
-                            ready=data["status"].get("data_ready") is True, as_of=data["as_of"]
+                            ready=data["status"].get("data_ready") is True,
+                            as_of=data["as_of"],
+                            source=data["status"].get("market_data_source"),
                         )
                         risk = await asyncio.to_thread(RiskService(db).state)
                         analyzed = bool(
@@ -254,9 +260,11 @@ async def serve(
                                     data = await fetch_memory(
                                         session, internal_token, base=gateway_base, symbols=symbols
                                     )
+                                    require_market_environment(data, "testnet")
                                     market.update(
                                         ready=data["status"].get("data_ready") is True,
                                         as_of=data["as_of"],
+                                        source=data["status"].get("market_data_source"),
                                     )
                                 await asyncio.to_thread(
                                     decisions.tick, data, symbols=selected_symbols, pending=pending
@@ -321,6 +329,10 @@ async def serve(
                             private_stream=stream.health(),
                             protection=recovery.health(),
                             protection_ready=recovery.ready,
+                            account_reconciled=recovery.ready,
+                            market_ready=bool(market["ready"]),
+                            market_data_source=market["source"] if market["ready"] else None,
+                            risk_allowed=not risk.kill_switch,
                             blockers=blockers,
                         )
                         progress.complete(
@@ -343,6 +355,7 @@ async def serve(
                     ArithmeticError,
                 ) as error:
                     progress.fail(error)
+                    progress.state["blockers"] = [progress.state["reason"]]
                 finally:
                     progress.state.update(decisions.status())
                     at = datetime.now(UTC)

@@ -264,7 +264,9 @@ class CanonicalFeed:
             return False
         if symbol in self.books and self.books[symbol].state_at(at) is not StreamState.READY:
             return False
-        if symbol in self.flows and self.flows[symbol].validity_at(at) is not DataQuality.OK:
+        if symbol in self.books and (
+            symbol not in self.flows or self.flows[symbol].validity_at(at) is not DataQuality.OK
+        ):
             return False
         return not self.bar_rejections(symbol, at)
 

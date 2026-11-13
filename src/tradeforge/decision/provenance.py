@@ -15,6 +15,11 @@ from tradeforge.intelligence.models import digest
 from tradeforge.risk.governor import RiskAssessment
 
 
+def candidate_decision_id(candidate: AlphaCandidate) -> UUID:
+    identity = (*candidate.instrument.key, candidate.alpha_family.value, candidate.setup_id)
+    return uuid5(NAMESPACE_URL, "tradeforge/decision/" + "/".join(identity))
+
+
 class Discovery(StrictModel):
     candidate: AlphaCandidate
     cluster: Text
@@ -32,9 +37,7 @@ class Discovery(StrictModel):
 
     @property
     def decision_id(self) -> UUID:
-        c = self.candidate
-        identity = (*c.instrument.key, c.alpha_family.value, c.setup_id)
-        return uuid5(NAMESPACE_URL, "tradeforge/decision/" + "/".join(identity))
+        return candidate_decision_id(self.candidate)
 
     @property
     def digest(self) -> str:

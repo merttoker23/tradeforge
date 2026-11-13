@@ -1,6 +1,6 @@
 """Strict pre-decision contracts; an ordinal setup is never a calibrated forecast."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
@@ -144,6 +144,30 @@ class AlphaCandidate(StrictModel):
 class AlphaResult(StrictModel):
     candidate: AlphaCandidate | None
     reason_codes: Annotated[tuple[Text, ...], Field(min_length=1)]
+    failed_gates: tuple[Text, ...] = ()
+
+
+def evidence_blockers(d: MomentumInput, now: datetime, minimum_history: int) -> list[str]:
+    blockers = []
+    if d.quality is not DataQuality.OK:
+        blockers.append("DATA_UNAVAILABLE")
+    for bars in (d.setup_bars, d.medium_bars, d.higher_bars):
+        if len(bars) < minimum_history:
+            blockers.append("INSUFFICIENT_HISTORY")
+        elif (now - bars[-1].close_at).total_seconds() >= bars[-1].timeframe.seconds:
+            blockers.append("STALE_BARS")
+    f = d.features
+    if (
+        now - f.state.source_at
+    ).total_seconds() > f.policy.max_age_periods * f.frame.timeframe.seconds:
+        blockers.append("STALE_REGIME")
+    universe = f.frame.universe
+    if (
+        d.instrument not in universe.eligible
+        or (now - universe.observed_at).total_seconds() > f.policy.universe_ttl_seconds
+    ):
+        blockers.append("UNIVERSE_UNAVAILABLE")
+    return blockers
 
 
 def instrument_stress(sample: MomentumInput) -> str | None:

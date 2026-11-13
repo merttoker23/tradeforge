@@ -32,10 +32,16 @@ class ClockSync:
         if rtt > self.max_rtt:
             self.reason = "CLOCK_RTT"
             return False
+        if abs(offset) + rtt / 2 > self.max_skew:
+            # This response overlaps the admissible offset boundary. It proves
+            # neither safe timing nor real skew. Keep any still-fresh proof and
+            # let the sampler retry; this response never extends the deadline.
+            self.reason = "CLOCK_RTT"
+            return False
         self.sample_at, self.sample_mono = received, mono
-        self.valid = rtt <= self.max_rtt and abs(offset) + rtt / 2 <= self.max_skew
-        self.reason = "OK" if self.valid else "CLOCK_SKEW"
-        return self.valid
+        self.valid = True
+        self.reason = "OK"
+        return True
 
     def ready(self, now: datetime, mono: float) -> bool:
         if not self.valid or self.sample_at is None or not math.isfinite(mono):
